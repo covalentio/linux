@@ -111,3 +111,15 @@ const struct bpf_func_proto bpf_get_smp_processor_id_proto = {
 	.gpl_only	= false,
 	.ret_type	= RET_INTEGER,
 };
+
+static u64 bpf_ktime_get_ns(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5)
+{
+	/* NMI safe access to clock monotonic */
+	return ktime_get_mono_fast_ns();
+}
+
+const struct bpf_func_proto bpf_ktime_get_ns_proto = {
+	.func		= bpf_ktime_get_ns,
+	.gpl_only	= true,
+	.ret_type	= RET_INTEGER,
+};
