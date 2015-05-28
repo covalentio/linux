@@ -435,14 +435,13 @@ select_insn:
 		CONT;
 
 	JMP_TAIL_CALL: {
-		struct bpf_map *map = (struct bpf_map *) (unsigned long) BPF_R2;
+		bpf_init_ptr(struct bpf_map *, map, BPF_R2);
 		struct bpf_array *array = container_of(map, struct bpf_array, map);
 		struct bpf_prog *prog;
 		u64 index = BPF_R3;
 
 		if (unlikely(index >= array->map.max_entries))
 			goto out;
-
 		if (unlikely(tail_call_cnt > MAX_TAIL_CALL_CNT))
 			goto out;
 

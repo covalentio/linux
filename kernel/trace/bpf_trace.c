@@ -61,11 +61,10 @@ unsigned int trace_call_bpf(struct bpf_prog *prog, void *ctx)
 }
 EXPORT_SYMBOL_GPL(trace_call_bpf);
 
-static u64 bpf_probe_read(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5)
+static u64 bpf_probe_read(u64 r1, u64 size, u64 r3, u64 r4, u64 r5)
 {
-	void *dst = (void *) (long) r1;
-	int size = (int) r2;
-	void *unsafe_ptr = (void *) (long) r3;
+	bpf_init_ptr(void *, dst, r1);
+	bpf_init_ptr(void *, unsafe_ptr, r3);
 
 	return probe_kernel_read(dst, unsafe_ptr, size);
 }
@@ -85,7 +84,7 @@ static const struct bpf_func_proto bpf_probe_read_proto = {
  */
 static u64 bpf_trace_printk(u64 r1, u64 fmt_size, u64 r3, u64 r4, u64 r5)
 {
-	char *fmt = (char *) (long) r1;
+	bpf_init_ptr(char *, fmt, r1);
 	int mod[3] = {};
 	int fmt_cnt = 0;
 	int i;

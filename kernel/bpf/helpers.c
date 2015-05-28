@@ -23,24 +23,19 @@
  * if program is allowed to access maps, so check rcu_read_lock_held in
  * all three functions.
  */
+
 static u64 bpf_map_lookup_elem(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5)
 {
-	/* verifier checked that R1 contains a valid pointer to bpf_map
+	/* Verifier checked that R1 contains a valid pointer to bpf_map
 	 * and R2 points to a program stack and map->key_size bytes were
-	 * initialized
+	 * initialized. We return either pointer to element, value, or
+	 * NULL which is the meaning of PTR_TO_MAP_VALUE_OR_NULL type.
 	 */
-	struct bpf_map *map = (struct bpf_map *) (unsigned long) r1;
-	void *key = (void *) (unsigned long) r2;
-	void *value;
+	bpf_init_ptr(struct bpf_map *, map, r1);
+	bpf_init_ptr(void *, key, r2);
 
 	WARN_ON_ONCE(!rcu_read_lock_held());
-
-	value = map->ops->map_lookup_elem(map, key);
-
-	/* lookup() returns either pointer to element value or NULL
-	 * which is the meaning of PTR_TO_MAP_VALUE_OR_NULL type
-	 */
-	return (unsigned long) value;
+	return (unsigned long) map->ops->map_lookup_elem(map, key);
 }
 
 const struct bpf_func_proto bpf_map_lookup_elem_proto = {
@@ -51,15 +46,14 @@ const struct bpf_func_proto bpf_map_lookup_elem_proto = {
 	.arg2_type	= ARG_PTR_TO_MAP_KEY,
 };
 
-static u64 bpf_map_update_elem(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5)
+static u64 bpf_map_update_elem(u64 r1, u64 r2, u64 r3, u64 flags, u64 r5)
 {
-	struct bpf_map *map = (struct bpf_map *) (unsigned long) r1;
-	void *key = (void *) (unsigned long) r2;
-	void *value = (void *) (unsigned long) r3;
+	bpf_init_ptr(struct bpf_map *, map, r1);
+	bpf_init_ptr(void *, key, r2);
+	bpf_init_ptr(void *, value, r3);
 
 	WARN_ON_ONCE(!rcu_read_lock_held());
-
-	return map->ops->map_update_elem(map, key, value, r4);
+	return map->ops->map_update_elem(map, key, value, flags);
 }
 
 const struct bpf_func_proto bpf_map_update_elem_proto = {
@@ -74,11 +68,10 @@ const struct bpf_func_proto bpf_map_update_elem_proto = {
 
 static u64 bpf_map_delete_elem(u64 r1, u64 r2, u64 r3, u64 r4, u64 r5)
 {
-	struct bpf_map *map = (struct bpf_map *) (unsigned long) r1;
-	void *key = (void *) (unsigned long) r2;
+	bpf_init_ptr(struct bpf_map *, map, r1);
+	bpf_init_ptr(void *, key, r2);
 
 	WARN_ON_ONCE(!rcu_read_lock_held());
-
 	return map->ops->map_delete_elem(map, key);
 }
 

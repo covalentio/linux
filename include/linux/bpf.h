@@ -141,11 +141,17 @@ struct bpf_array {
 		struct bpf_prog *prog[0] __aligned(8);
 	};
 };
+
 #define MAX_TAIL_CALL_CNT 32
 
 u64 bpf_tail_call(u64 ctx, u64 r2, u64 index, u64 r4, u64 r5);
 void bpf_prog_array_map_clear(struct bpf_map *map);
 bool bpf_prog_array_compatible(struct bpf_array *array, const struct bpf_prog *fp);
+
+#ifndef bpf_init_ptr
+# define bpf_init_ptr(type, name, reg)	\
+	type name = (type) (unsigned long) reg
+#endif
 
 #ifdef CONFIG_BPF_SYSCALL
 void bpf_register_prog_type(struct bpf_prog_type_list *tl);

@@ -1257,10 +1257,10 @@ static bool bpf_skb_clone_unwritable(const struct sk_buff *skb, int len)
 
 static u64 bpf_skb_store_bytes(u64 r1, u64 r2, u64 r3, u64 r4, u64 flags)
 {
-	struct sk_buff *skb = (struct sk_buff *) (long) r1;
-	int offset = (int) r2;
-	void *from = (void *) (long) r3;
+	bpf_init_ptr(struct sk_buff *, skb, r1);
+	bpf_init_ptr(void *, from, r3);
 	unsigned int len = (unsigned int) r4;
+	int offset = (int) r2;
 	char buf[16];
 	void *ptr;
 
@@ -1295,6 +1295,7 @@ static u64 bpf_skb_store_bytes(u64 r1, u64 r2, u64 r3, u64 r4, u64 flags)
 
 	if (BPF_RECOMPUTE_CSUM(flags) && skb->ip_summed == CHECKSUM_COMPLETE)
 		skb->csum = csum_add(skb->csum, csum_partial(ptr, len, 0));
+
 	return 0;
 }
 
@@ -1314,7 +1315,7 @@ const struct bpf_func_proto bpf_skb_store_bytes_proto = {
 
 static u64 bpf_l3_csum_replace(u64 r1, u64 r2, u64 from, u64 to, u64 flags)
 {
-	struct sk_buff *skb = (struct sk_buff *) (long) r1;
+	bpf_init_ptr(struct sk_buff *, skb, r1);
 	int offset = (int) r2;
 	__sum16 sum, *ptr;
 
@@ -1361,7 +1362,7 @@ const struct bpf_func_proto bpf_l3_csum_replace_proto = {
 
 static u64 bpf_l4_csum_replace(u64 r1, u64 r2, u64 from, u64 to, u64 flags)
 {
-	struct sk_buff *skb = (struct sk_buff *) (long) r1;
+	bpf_init_ptr(struct sk_buff *, skb, r1);
 	u32 is_pseudo = BPF_IS_PSEUDO_HEADER(flags);
 	int offset = (int) r2;
 	__sum16 sum, *ptr;
