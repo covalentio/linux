@@ -150,8 +150,15 @@ struct bpf_array {
 #define MAX_TAIL_CALL_CNT 32
 
 u64 bpf_tail_call(u64 ctx, u64 r2, u64 index, u64 r4, u64 r5);
+
 void bpf_prog_array_map_clear(struct bpf_map *map);
-bool bpf_prog_array_compatible(struct bpf_array *array, const struct bpf_prog *fp);
+bool bpf_prog_array_compatible(struct bpf_array *array,
+			       const struct bpf_prog *fp);
+
+/* Maximum number of maps accessed by one eBPF program, given it's
+ * an internal detail, this one must not be exposed to uapi.
+ */
+#define BPF_MAXMAPS	64
 
 #ifndef bpf_init_ptr
 # define bpf_init_ptr(type, name, reg)	\

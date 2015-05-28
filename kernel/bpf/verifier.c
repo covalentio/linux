@@ -186,8 +186,6 @@ struct verifier_stack_elem {
 	struct verifier_stack_elem *next;
 };
 
-#define MAX_USED_MAPS 64 /* max number of maps accessed by one eBPF program */
-
 /* single container for all structs
  * one verifier_env per bpf_check() call
  */
@@ -197,7 +195,7 @@ struct verifier_env {
 	int stack_size;			/* number of states to be processed */
 	struct verifier_state cur_state; /* current verifier state */
 	struct verifier_state_list **explored_states; /* search pruning optimization */
-	struct bpf_map *used_maps[MAX_USED_MAPS]; /* array of map's used by eBPF program */
+	struct bpf_map *used_maps[BPF_MAXMAPS]; /* array of map's used by eBPF program */
 	u32 used_map_cnt;		/* number of used maps */
 };
 
@@ -1886,7 +1884,7 @@ static int replace_map_fd_with_map_ptr(struct verifier_env *env)
 					goto next_insn;
 				}
 
-			if (env->used_map_cnt >= MAX_USED_MAPS) {
+			if (env->used_map_cnt >= BPF_MAXMAPS) {
 				fdput(f);
 				return -E2BIG;
 			}
