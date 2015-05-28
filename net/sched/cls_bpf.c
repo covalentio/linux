@@ -40,12 +40,14 @@ struct cls_bpf_prog {
 	struct tcf_result res;
 	struct tcf_exts exts;
 	u32 handle;
+	u32 bpf_fd;
 	union {
-		u32 bpf_fd;
 		u16 bpf_num_ops;
+		u16 bpf_num_pms;
 	};
 	struct sock_filter *bpf_ops;
 	const char *bpf_name;
+	struct bpf_map **pmaps;
 	struct tcf_proto *tp;
 	struct rcu_head rcu;
 };
@@ -57,6 +59,8 @@ static const struct nla_policy bpf_policy[TCA_BPF_MAX + 1] = {
 	[TCA_BPF_OPS_LEN]	= { .type = NLA_U16 },
 	[TCA_BPF_OPS]		= { .type = NLA_BINARY,
 				    .len = sizeof(struct sock_filter) * BPF_MAXINSNS },
+	[TCA_BPF_PMS]		= { .type = NLA_BINARY,
+				    .len = sizeof(u32) * BPF_MAXMAPS },
 };
 
 static int cls_bpf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
@@ -67,7 +71,7 @@ static int cls_bpf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 	int ret = -1;
 
 	if (unlikely(!skb_mac_header_was_set(skb)))
-		return -1;
+		return ret;
 
 	/* Needed here for accessing maps. */
 	rcu_read_lock();
@@ -111,14 +115,40 @@ static int cls_bpf_init(struct tcf_proto *tp)
 	return 0;
 }
 
+static void cls_bpf_pmaps_purge(struct cls_bpf_prog *prog)
+{
+	struct bpf_map *map;
+	int i;
+
+	for (i = 0; i < prog->bpf_num_pms; i++) {
+		map = prog->pmaps[i];
+
+		BUG_ON(map->map_type != BPF_MAP_TYPE_PROG_ARRAY);
+		bpf_prog_array_map_clear(map);
+
+		/* In case this map is still somewhere shared with
+		 * user space, let the last cleanup run be done when
+		 * user space file descriptor is released, else if
+		 * still shared with other progs, let them purge it
+		 * once again here. In case we're the last one, we
+		 * are done here otherwise.
+		 */
+		clear_bit(BPF_MAP_MANAGED, &map->flags);
+
+		bpf_map_put(map); //XXX deferred
+	}
+}
+
 static void cls_bpf_delete_prog(struct tcf_proto *tp, struct cls_bpf_prog *prog)
 {
 	tcf_exts_destroy(&prog->exts);
 
-	if (cls_bpf_is_ebpf(prog))
+	if (cls_bpf_is_ebpf(prog)) {
+		cls_bpf_pmaps_purge(prog);
 		bpf_prog_put(prog->filter);
-	else
+	} else {
 		bpf_prog_destroy(prog->filter);
+	}
 
 	kfree(prog->bpf_name);
 	kfree(prog->bpf_ops);
@@ -223,11 +253,57 @@ static int cls_bpf_prog_from_ops(struct nlattr **tb,
 	return 0;
 }
 
+static struct bpf_map **cls_bpf_gen_pmaps(struct nlattr *attr,
+					  u16 *bpf_num_pms)
+{
+	struct bpf_map **pmaps, *map;
+	u32 *fds;
+	u16 num;
+	int i;
+
+	if (!nla_len(attr) || nla_len(attr) % sizeof(u32) != 0)
+		return ERR_PTR(-EINVAL);
+
+	num = nla_len(attr) / sizeof(u32);
+	fds = nla_data(attr);
+
+	pmaps = kcalloc(num, sizeof(*pmaps), GFP_KERNEL);
+	if (!pmaps)
+		return ERR_PTR(-ENOMEM);
+
+	for (i = 0; i < num; i++) {
+		map = bpf_map_get(fds[i]);
+		if (IS_ERR(map)) {
+			// XXX unwind
+			return ERR_CAST(map);
+		}
+
+		if (map->map_type != BPF_MAP_TYPE_PROG_ARRAY) {
+			// XXX unwind
+			bpf_map_put(map);
+			return ERR_PTR(-EINVAL);
+		}
+
+		/* If shared by multiple progs, then this flag could
+		 * already have been set, that's okay. Only last man
+		 * standing needs to properly purge the map.
+		 */
+		set_bit(BPF_MAP_MANAGED, &map->flags);
+		pmaps[i] = map;
+	}
+
+	*bpf_num_pms = num;
+
+	return pmaps;
+}
+
 static int cls_bpf_prog_from_efd(struct nlattr **tb,
 				 struct cls_bpf_prog *prog, u32 classid)
 {
+	struct bpf_map **pmaps = NULL;
 	struct bpf_prog *fp;
 	char *name = NULL;
+	u16 bpf_num_pms = 0;
 	u32 bpf_fd;
 
 	bpf_fd = nla_get_u32(tb[TCA_BPF_FD]);
@@ -251,9 +327,22 @@ static int cls_bpf_prog_from_efd(struct nlattr **tb,
 		}
 	}
 
+	if (tb[TCA_BPF_PMS]) {
+		pmaps = cls_bpf_gen_pmaps(tb[TCA_BPF_PMS],
+					  &bpf_num_pms);
+		if (IS_ERR(pmaps)) {
+			kfree(name);
+			bpf_prog_put(fp);
+			return PTR_ERR(pmaps);
+		}
+	}
+
 	prog->bpf_ops = NULL;
 	prog->bpf_fd = bpf_fd;
 	prog->bpf_name = name;
+
+	prog->pmaps = pmaps;
+	prog->bpf_num_pms = bpf_num_pms;
 
 	prog->filter = fp;
 	prog->res.classid = classid;

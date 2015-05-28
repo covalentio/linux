@@ -234,6 +234,7 @@ void bpf_prog_array_map_clear(struct bpf_map *map)
 	for (i = 0; i < array->map.max_entries; i++)
 		prog_array_map_delete_elem(map, &i);
 }
+EXPORT_SYMBOL_GPL(bpf_prog_array_map_clear); //XXX stub when !syscall
 
 static const struct bpf_map_ops prog_array_ops = {
 	.map_alloc = prog_array_map_alloc,

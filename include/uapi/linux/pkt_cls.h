@@ -382,6 +382,7 @@ enum {
 	TCA_BPF_OPS,
 	TCA_BPF_FD,
 	TCA_BPF_NAME,
+	TCA_BPF_PMS,
 	__TCA_BPF_MAX,
 };
 
