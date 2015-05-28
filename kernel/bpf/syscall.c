@@ -58,6 +58,7 @@ void bpf_map_put(struct bpf_map *map)
 		schedule_work(&map->work);
 	}
 }
+EXPORT_SYMBOL_GPL(bpf_map_put);
 
 static int bpf_map_release(struct inode *inode, struct file *filp)
 {
@@ -121,22 +122,32 @@ free_map:
 /* if error is returned, fd is released.
  * On success caller should complete fd access with matching fdput()
  */
-struct bpf_map *bpf_map_get(struct fd f)
+struct bpf_map *__bpf_map_get(struct fd f)
 {
-	struct bpf_map *map;
-
 	if (!f.file)
 		return ERR_PTR(-EBADF);
-
 	if (f.file->f_op != &bpf_map_fops) {
 		fdput(f);
 		return ERR_PTR(-EINVAL);
 	}
 
-	map = f.file->private_data;
+	return f.file->private_data;
+}
 
+struct bpf_map *bpf_map_get(u32 ufd)
+{
+	struct fd f = fdget(ufd);
+	struct bpf_map *map;
+
+	map = __bpf_map_get(f);
+	if (IS_ERR(map))
+		return map;
+
+	atomic_inc(&map->refcnt);
+	fdput(f);
 	return map;
 }
+EXPORT_SYMBOL_GPL(bpf_map_get);
 
 /* helper to convert user pointers passed inside __aligned_u64 fields */
 static void __user *u64_to_ptr(__u64 val)
@@ -160,7 +171,7 @@ static int map_lookup_elem(union bpf_attr *attr)
 	if (CHECK_ATTR(BPF_MAP_LOOKUP_ELEM))
 		return -EINVAL;
 
-	map = bpf_map_get(f);
+	map = __bpf_map_get(f);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
 
@@ -218,7 +229,7 @@ static int map_update_elem(union bpf_attr *attr)
 	if (CHECK_ATTR(BPF_MAP_UPDATE_ELEM))
 		return -EINVAL;
 
-	map = bpf_map_get(f);
+	map = __bpf_map_get(f);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
 
@@ -270,7 +281,7 @@ static int map_delete_elem(union bpf_attr *attr)
 	if (CHECK_ATTR(BPF_MAP_DELETE_ELEM))
 		return -EINVAL;
 
-	map = bpf_map_get(f);
+	map = __bpf_map_get(f);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
 
@@ -310,7 +321,7 @@ static int map_get_next_key(union bpf_attr *attr)
 	if (CHECK_ATTR(BPF_MAP_GET_NEXT_KEY))
 		return -EINVAL;
 
-	map = bpf_map_get(f);
+	map = __bpf_map_get(f);
 	if (IS_ERR(map))
 		return PTR_ERR(map);
 
@@ -450,21 +461,16 @@ static const struct file_operations bpf_prog_fops = {
         .release = bpf_prog_release,
 };
 
-static struct bpf_prog *get_prog(struct fd f)
+static struct bpf_prog *__bpf_get_prog(struct fd f)
 {
-	struct bpf_prog *prog;
-
 	if (!f.file)
 		return ERR_PTR(-EBADF);
-
 	if (f.file->f_op != &bpf_prog_fops) {
 		fdput(f);
 		return ERR_PTR(-EINVAL);
 	}
 
-	prog = f.file->private_data;
-
-	return prog;
+	return f.file->private_data;
 }
 
 /* called by sockets/tracing/seccomp before attaching program to an event
@@ -475,8 +481,7 @@ struct bpf_prog *bpf_prog_get(u32 ufd)
 	struct fd f = fdget(ufd);
 	struct bpf_prog *prog;
 
-	prog = get_prog(f);
-
+	prog = __bpf_get_prog(f);
 	if (IS_ERR(prog))
 		return prog;
 
