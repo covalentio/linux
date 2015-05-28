@@ -38,27 +38,22 @@ static struct bpf_map *find_and_alloc_map(union bpf_attr *attr)
 	return ERR_PTR(-EINVAL);
 }
 
-/* boot time registration of different map implementations */
 void bpf_register_map_type(struct bpf_map_type_list *tl)
 {
 	list_add(&tl->list_node, &bpf_map_types);
 }
 
-/* called from workqueue */
 static void bpf_map_free_deferred(struct work_struct *work)
 {
 	struct bpf_map *map = container_of(work, struct bpf_map, work);
 
-	/* implementation dependent freeing */
 	map->ops->map_free(map);
 }
 
-/* decrement map refcnt and schedule it for freeing via workqueue
- * (unrelying map implementation ops->map_free() might sleep)
- */
 void bpf_map_put(struct bpf_map *map)
 {
 	if (atomic_dec_and_test(&map->refcnt)) {
+		/* We could sleep on destruction, hence deferral. */
 		INIT_WORK(&map->work, bpf_map_free_deferred);
 		schedule_work(&map->work);
 	}
@@ -68,10 +63,12 @@ static int bpf_map_release(struct inode *inode, struct file *filp)
 {
 	struct bpf_map *map = filp->private_data;
 
-	if (map->map_type == BPF_MAP_TYPE_PROG_ARRAY)
-		/* prog_array stores refcnt-ed bpf_prog pointers
-		 * release them all when user space closes prog_array_fd
-		 */
+	/* Program array maps could have wild circular dependencies,
+	 * thus unmanaged maps must be purged on user fd destruction
+	 * to release other prog ref counters.
+	 */
+	if (map->map_type == BPF_MAP_TYPE_PROG_ARRAY &&
+	    !test_bit(BPF_MAP_MANAGED, &map->flags))
 		bpf_prog_array_map_clear(map);
 
 	bpf_map_put(map);

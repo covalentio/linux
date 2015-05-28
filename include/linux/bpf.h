@@ -26,13 +26,18 @@ struct bpf_map_ops {
 	int (*map_delete_elem)(struct bpf_map *map, void *key);
 };
 
+enum {
+	BPF_MAP_MANAGED = 0,	/* Purging of prog map managed by susbys? */
+};
+
 struct bpf_map {
 	atomic_t refcnt;
 	enum bpf_map_type map_type;
+	const struct bpf_map_ops *ops;
 	u32 key_size;
 	u32 value_size;
 	u32 max_entries;
-	const struct bpf_map_ops *ops;
+	unsigned long flags;
 	struct work_struct work;
 };
 
