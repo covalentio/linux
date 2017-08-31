@@ -1846,7 +1846,7 @@ BPF_CALL_4(bpf_sk_redirect_map, struct sk_buff *, skb,
 	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
 
 	/* If user passes invalid input drop the packet. */
-	if (unlikely(flags))
+	if (unlikely(flags & ~(BPF_F_INGRESS)))
 		return SK_DROP;
 
 	tcb->bpf.key = key;
@@ -1856,7 +1856,13 @@ BPF_CALL_4(bpf_sk_redirect_map, struct sk_buff *, skb,
 	return SK_PASS;
 }
 
-struct sock *do_sk_redirect_map(struct sk_buff *skb)
+static inline bool bpf_map_invalid(const struct bpf_prog *prog,
+				   unsigned long aux)
+{
+	return (unsigned long)prog->aux != aux;
+}
+
+struct sock *do_sk_redirect_map(struct sk_buff *skb, u32 *flags)
 {
 	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
 	struct sock *sk = NULL;
@@ -1864,8 +1870,10 @@ struct sock *do_sk_redirect_map(struct sk_buff *skb)
 	if (tcb->bpf.map) {
 		sk = __sock_map_lookup_elem(tcb->bpf.map, tcb->bpf.key);
 
+		*flags = tcb->bpf.flags;
 		tcb->bpf.key = 0;
 		tcb->bpf.map = NULL;
+		tcb->bpf.flags = 0;
 	}
 
 	return sk;
