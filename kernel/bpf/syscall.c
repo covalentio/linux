@@ -1285,6 +1285,9 @@ static int bpf_prog_attach(const union bpf_attr *attr)
 	case BPF_CGROUP_INET_EGRESS:
 		ptype = BPF_PROG_TYPE_CGROUP_SKB;
 		break;
+	case BPF_CGROUP_TCP_SEND:
+		ptype = BPF_PROG_TYPE_SK_SKB;
+		break;
 	case BPF_CGROUP_INET_SOCK_CREATE:
 		ptype = BPF_PROG_TYPE_CGROUP_SOCK;
 		break;
@@ -1342,6 +1345,9 @@ static int bpf_prog_detach(const union bpf_attr *attr)
 		break;
 	case BPF_CGROUP_SOCK_OPS:
 		ptype = BPF_PROG_TYPE_SOCK_OPS;
+		break;
+	case BPF_CGROUP_TCP_SEND:
+		ptype = BPF_PROG_TYPE_SK_SKB;
 		break;
 	case BPF_SK_SKB_STREAM_PARSER:
 	case BPF_SK_SKB_STREAM_VERDICT:

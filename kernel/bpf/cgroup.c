@@ -522,3 +522,32 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
 	return ret == 1 ? 0 : -EPERM;
 }
 EXPORT_SYMBOL(__cgroup_bpf_run_filter_sock_ops);
+
+/**
+ * __cgroup_bpf_run_filter_sk_skb() - Run a program on a sock with skb contex
+ * @sk: socket to get cgroup from
+ * @skb: The skb that is being sent or received
+ * @type: The type of program to be exectuted
+ *
+ * The program type passed in via @type must be suitable for sk_skb program
+ * types. No further check is performed to assert that.
+ *
+ * This function will return %-EPERM if an attached program was found and if
+ * it returned != 1 dureing execution. In all other cases, 0 is returned.
+ */
+int __cgroup_bpf_run_filter_sk_skb(struct sock *sk,
+				   struct sk_buff *skb,
+				   enum bpf_attach_type type)
+{
+	struct cgroup *cgrp = sock_cgroup_ptr(&sk->sk_cgrp_data);
+	struct sock *save_sk;
+	int ret;
+
+	save_sk = skb->sk;
+	skb->sk = sk;
+	ret = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[type], skb,
+				 BPF_PROG_RUN);
+	skb->sk = save_sk;
+	return ret == 1 ? 0 : -EPERM;
+}
+EXPORT_SYMBOL(__cgroup_bpf_run_filter_sk_skb);

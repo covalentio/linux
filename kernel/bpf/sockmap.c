@@ -136,7 +136,7 @@ static inline bool is_ingress_ok(struct sock *sk)
 	return atomic_read(&sk->sk_rmem_alloc) < sk->sk_rcvbuf;
 }
 
-int sk_redirect(struct sk_buff *skb, struct bpf_prog *prog)
+int sk_redirect(struct sk_buff *skb)
 {
 	struct smap_psock *peer = NULL;
 	struct sock *sk;
@@ -178,7 +178,7 @@ static void smap_do_verdict(struct smap_psock *psock, struct sk_buff *skb)
 	rc = smap_verdict_func(psock, skb, prog);
 	switch (rc) {
 	case SK_REDIRECT:
-		err = sk_redirect(skb, prog);
+		err = sk_redirect(skb);
 		if (!err)
 			break;
 	case SK_DROP:

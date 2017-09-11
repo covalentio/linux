@@ -2049,10 +2049,28 @@ static inline int tcp_call_bpf(struct sock *sk, int op)
 		ret = -1;
 	return ret;
 }
+
+static inline int tcp_call_bpf_sk_skb(struct sock *sk, struct sk_buff *skb)
+{
+	int ret;
+
+	TCP_SKB_CB(skb)->bpf.map = NULL;
+	ret = BPF_CGROUP_RUN_PROG_TCP_SEND(sk, skb);
+	if (ret == 0)
+		ret = TCP_SKB_CB(skb)->bpf.map ? SK_REDIRECT : SK_PASS;
+	else
+		ret = SK_DROP;
+	return ret;
+}
 #else
 static inline int tcp_call_bpf(struct sock *sk, int op)
 {
 	return -EPERM;
+}
+
+static inline int tcp_call_bpf_sk_skb(struct sock *sk, struct sk_buff *skb)
+{
+	return SK_PASS;
 }
 #endif
 
