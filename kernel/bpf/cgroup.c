@@ -188,13 +188,27 @@ int __cgroup_bpf_run_filter_skb(struct sock *sk,
 
 	prog = rcu_dereference(cgrp->bpf.effective[type]);
 	if (prog) {
-		unsigned int offset = skb->data - skb_network_header(skb);
 		struct sock *save_sk = skb->sk;
 
 		skb->sk = sk;
-		__skb_push(skb, offset);
-		ret = bpf_prog_run_save_cb(prog, skb) == 1 ? 0 : -EPERM;
-		__skb_pull(skb, offset);
+		if (type == BPF_CGROUP_TCP_SEND) {
+			preempt_disable();
+			ret = BPF_PROG_RUN(prog, skb);
+			switch (ret) {
+			case SK_REDIRECT:
+				break;
+			default:
+				preempt_enable();
+				break;
+			}
+		} else {
+			unsigned int offset = skb->data -
+						skb_network_header(skb);
+
+			__skb_push(skb, offset);
+			ret = bpf_prog_run_save_cb(prog, skb) == 1 ? 0 : -EPERM;
+			__skb_pull(skb, offset);
+		}
 		skb->sk = save_sk;
 	}
 
@@ -203,6 +217,22 @@ int __cgroup_bpf_run_filter_skb(struct sock *sk,
 	return ret;
 }
 EXPORT_SYMBOL(__cgroup_bpf_run_filter_skb);
+
+bool bpf_cgroup_tcp_sendmsg_enabled(struct sock *sk)
+{
+	struct bpf_prog *prog = NULL;
+
+	if (cgroup_bpf_enabled) {
+		struct cgroup *cgrp;
+
+		rcu_read_lock();
+		cgrp = sock_cgroup_ptr(&sk->sk_cgrp_data);
+		prog = rcu_dereference(cgrp->bpf.effective[BPF_CGROUP_TCP_SEND]);
+		rcu_read_unlock();
+	}
+	return prog ? true : false;
+}
+EXPORT_SYMBOL(bpf_cgroup_tcp_sendmsg_enabled);
 
 /**
  * __cgroup_bpf_run_filter_sk() - Run a program on a sock

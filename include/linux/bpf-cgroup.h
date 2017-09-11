@@ -47,6 +47,13 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
 				     struct bpf_sock_ops_kern *sock_ops,
 				     enum bpf_attach_type type);
 
+bool bpf_cgroup_tcp_sendmsg_enabled(struct sock *sk);
+
+static inline bool is_bpf_redirect(int bpf)
+{
+	return bpf == SK_REDIRECT;
+}
+
 /* Wrappers for __cgroup_bpf_run_filter_skb() guarded by cgroup_bpf_enabled. */
 #define BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb)			      \
 ({									      \
@@ -68,6 +75,16 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
 						      BPF_CGROUP_INET_EGRESS); \
 	}								       \
 	__ret;								       \
+})
+
+#define BPF_CGROUP_RUN_PROG_TCP_SEND(sk, skb)				      \
+({									      \
+	int __ret = 0;							      \
+	if (cgroup_bpf_enabled)						      \
+		__ret = __cgroup_bpf_run_filter_skb(sk, skb,		      \
+						    BPF_CGROUP_TCP_SEND);     \
+									      \
+	__ret;								      \
 })
 
 #define BPF_CGROUP_RUN_PROG_INET_SOCK(sk)				       \
@@ -98,9 +115,18 @@ struct cgroup_bpf {};
 static inline void cgroup_bpf_put(struct cgroup *cgrp) {}
 static inline void cgroup_bpf_inherit(struct cgroup *cgrp,
 				      struct cgroup *parent) {}
+static inline bool bpf_cgroup_tcp_sendmsg_enabled(struct sock *sk)
+{
+	return false;
+}
+static inline bool is_bpf_redirect(int bpf)
+{
+	return 0;
+}
 
 #define BPF_CGROUP_RUN_PROG_INET_INGRESS(sk,skb) ({ 0; })
 #define BPF_CGROUP_RUN_PROG_INET_EGRESS(sk,skb) ({ 0; })
+#define BPF_CGROUP_RUN_PROG_TCP_SEND(sk,skb) ({ 0; })
 #define BPF_CGROUP_RUN_PROG_INET_SOCK(sk) ({ 0; })
 #define BPF_CGROUP_RUN_PROG_SOCK_OPS(sock_ops) ({ 0; })
 

@@ -914,12 +914,44 @@ static int tcp_send_mss(struct sock *sk, int *size_goal, int flags)
 	return mss_now;
 }
 
+static void tcp_sk_redirect(struct sock *sk, struct sk_buff *skb, int *bpf)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int err;
+
+	tcp_unlink_write_queue(skb, sk);
+	tcp_check_send_head(sk, skb);
+
+	sock_set_flag(sk, SOCK_QUEUE_SHRUNK);
+	sk->sk_wmem_queued -= skb->truesize;
+	sk_mem_uncharge(sk, skb->truesize);
+
+	tp->snd_nxt += skb->len;
+	err = sk_redirect(skb);
+	if (err)
+		__kfree_skb(skb);
+	*bpf = 0;
+}
+
+static int tcp_sk_drop(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	tcp_unlink_write_queue(skb, sk);
+	tcp_check_send_head(sk, skb);
+	tp->write_seq -= skb->len;
+	sk_wmem_free_skb(sk, skb);
+	return -EAGAIN;
+}
+
+
 ssize_t do_tcp_sendpages(struct sock *sk, struct page *page, int offset,
 			 size_t size, int flags)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
+	struct sk_buff *skb = NULL;
 	int mss_now, size_goal;
-	int err;
+	int err, bpf = 0;
 	ssize_t copied;
 	long timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
@@ -944,13 +976,17 @@ ssize_t do_tcp_sendpages(struct sock *sk, struct page *page, int offset,
 		goto out_err;
 
 	while (size > 0) {
-		struct sk_buff *skb = tcp_write_queue_tail(sk);
 		int copy, i;
 		bool can_coalesce;
+
+		skb = tcp_write_queue_tail(sk);
 
 		if (!tcp_send_head(sk) || (copy = size_goal - skb->len) <= 0 ||
 		    !tcp_skb_can_collapse_to(skb)) {
 new_segment:
+			if (is_bpf_redirect(bpf))
+				tcp_sk_redirect(sk, skb, &bpf);
+
 			if (!sk_stream_memory_free(sk))
 				goto wait_for_sndbuf;
 
@@ -969,7 +1005,8 @@ new_segment:
 		i = skb_shinfo(skb)->nr_frags;
 		can_coalesce = skb_can_coalesce(skb, i, page, offset);
 		if (!can_coalesce && i >= sysctl_max_skb_frags) {
-			tcp_mark_push(tp, skb);
+			if (!is_bpf_redirect(bpf))
+				tcp_mark_push(tp, skb);
 			goto new_segment;
 		}
 		if (!sk_wmem_schedule(sk, copy))
@@ -996,6 +1033,12 @@ new_segment:
 		if (!copied)
 			TCP_SKB_CB(skb)->tcp_flags &= ~TCPHDR_PSH;
 
+		bpf = bpf ? bpf : BPF_CGROUP_RUN_PROG_TCP_SEND(sk, skb);
+		if (bpf == SK_DROP) {
+			err = tcp_sk_drop(sk, skb);
+			goto do_error;
+		}
+
 		copied += copy;
 		offset += copy;
 		size -= copy;
@@ -1006,15 +1049,25 @@ new_segment:
 			continue;
 
 		if (forced_push(tp)) {
-			tcp_mark_push(tp, skb);
+			if (is_bpf_redirect(bpf))
+				tcp_sk_redirect(sk, skb, &bpf);
+			else
+				tcp_mark_push(tp, skb);
 			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
-		} else if (skb == tcp_send_head(sk))
-			tcp_push_one(sk, mss_now);
+		} else if (skb == tcp_send_head(sk)) {
+			if (is_bpf_redirect(bpf))
+				tcp_sk_redirect(sk, skb, &bpf);
+			else
+				tcp_push_one(sk, mss_now);
+		}
 		continue;
 
 wait_for_sndbuf:
 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 wait_for_memory:
+		if (is_bpf_redirect(bpf))
+			tcp_sk_redirect(sk, skb, &bpf);
+
 		tcp_push(sk, flags & ~MSG_MORE, mss_now,
 			 TCP_NAGLE_PUSH, size_goal);
 
@@ -1026,6 +1079,9 @@ wait_for_memory:
 	}
 
 out:
+	if (is_bpf_redirect(bpf))
+		tcp_sk_redirect(sk, skb, &bpf);
+
 	if (copied) {
 		tcp_tx_timestamp(sk, sk->sk_tsflags, tcp_write_queue_tail(sk));
 		if (!(flags & MSG_SENDPAGE_NOTLAST))
@@ -1167,9 +1223,9 @@ int tcp_sendmsg_locked(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct ubuf_info *uarg = NULL;
-	struct sk_buff *skb;
+	struct sk_buff *skb = NULL;
 	struct sockcm_cookie sockc;
-	int flags, err, copied = 0;
+	int flags, bpf = 0, err, copied = 0;
 	int mss_now = 0, size_goal, copied_syn = 0;
 	bool process_backlog = false;
 	bool sg;
@@ -1269,6 +1325,9 @@ restart:
 			bool first_skb;
 
 new_segment:
+			if (is_bpf_redirect(bpf))
+				tcp_sk_redirect(sk, skb, &bpf);
+
 			/* Allocate new segment. If the interface is SG,
 			 * allocate skb fitting to single page.
 			 */
@@ -1317,7 +1376,7 @@ new_segment:
 			err = skb_add_data_nocache(sk, skb, &msg->msg_iter, copy);
 			if (err)
 				goto do_fault;
-		} else if (!uarg || !uarg->zerocopy) {
+		} else if (!uarg || !uarg->zerocopy || bpf_cgroup_tcp_sendmsg_enabled(sk)) {
 			bool merge = true;
 			int i = skb_shinfo(skb)->nr_frags;
 			struct page_frag *pfrag = sk_page_frag(sk);
@@ -1328,7 +1387,10 @@ new_segment:
 			if (!skb_can_coalesce(skb, i, pfrag->page,
 					      pfrag->offset)) {
 				if (i >= sysctl_max_skb_frags || !sg) {
-					tcp_mark_push(tp, skb);
+					if (is_bpf_redirect(bpf))
+						tcp_sk_redirect(sk, skb, &bpf);
+					else
+						tcp_mark_push(tp, skb);
 					goto new_segment;
 				}
 				merge = false;
@@ -1371,6 +1433,12 @@ new_segment:
 		TCP_SKB_CB(skb)->end_seq += copy;
 		tcp_skb_pcount_set(skb, 0);
 
+		bpf = bpf ? bpf : BPF_CGROUP_RUN_PROG_TCP_SEND(sk, skb);
+		if (bpf == SK_DROP) {
+			err = tcp_sk_drop(sk, skb);
+			goto do_error;
+		}
+
 		copied += copy;
 		if (!msg_data_left(msg)) {
 			if (unlikely(flags & MSG_EOR))
@@ -1382,18 +1450,28 @@ new_segment:
 			continue;
 
 		if (forced_push(tp)) {
-			tcp_mark_push(tp, skb);
+			if (is_bpf_redirect(bpf))
+				tcp_sk_redirect(sk, skb, &bpf);
+			else
+				tcp_mark_push(tp, skb);
 			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
-		} else if (skb == tcp_send_head(sk))
-			tcp_push_one(sk, mss_now);
+		} else if (skb == tcp_send_head(sk)) {
+			if (is_bpf_redirect(bpf))
+				tcp_sk_redirect(sk, skb, &bpf);
+			else
+				tcp_push_one(sk, mss_now);
+		}
 		continue;
 
 wait_for_sndbuf:
 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 wait_for_memory:
-		if (copied)
+		if (copied) {
+			if (is_bpf_redirect(bpf))
+				tcp_sk_redirect(sk, skb, &bpf);
 			tcp_push(sk, flags & ~MSG_MORE, mss_now,
 				 TCP_NAGLE_PUSH, size_goal);
+		}
 
 		err = sk_stream_wait_memory(sk, &timeo);
 		if (err != 0)
@@ -1403,6 +1481,9 @@ wait_for_memory:
 	}
 
 out:
+	if (is_bpf_redirect(bpf))
+		tcp_sk_redirect(sk, skb, &bpf);
+
 	if (copied) {
 		tcp_tx_timestamp(sk, sockc.tsflags, tcp_write_queue_tail(sk));
 		tcp_push(sk, flags, mss_now, tp->nonagle, size_goal);
@@ -1415,10 +1496,11 @@ do_fault:
 	if (!skb->len) {
 		tcp_unlink_write_queue(skb, sk);
 		/* It is the one place in all of TCP, except connection
-		 * reset, where we can be unlinking the send_head.
+		 * reset and BPF, where we can be unlinking the send_head.
 		 */
 		tcp_check_send_head(sk, skb);
 		sk_wmem_free_skb(sk, skb);
+		bpf = 0;
 	}
 
 do_error:
