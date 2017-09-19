@@ -1120,6 +1120,16 @@ out:
 }
 
 static int
+bpf_object__load_types(struct bpf_object *obj, enum bpf_prog_type type)
+{
+	size_t i;
+
+	for (i = 0; i < obj->nr_programs; i++)
+		bpf_program__set_type(&obj->programs[i], type);
+	return 0;
+}
+
+static int
 bpf_object__load_progs(struct bpf_object *obj)
 {
 	size_t i;
@@ -1223,7 +1233,7 @@ int bpf_object__unload(struct bpf_object *obj)
 	return 0;
 }
 
-int bpf_object__load(struct bpf_object *obj)
+int bpf_object__load(struct bpf_object *obj, enum bpf_prog_type type)
 {
 	int err;
 
@@ -1239,6 +1249,7 @@ int bpf_object__load(struct bpf_object *obj)
 
 	CHECK_ERR(bpf_object__create_maps(obj), err, out);
 	CHECK_ERR(bpf_object__relocate(obj), err, out);
+	CHECK_ERR(bpf_object__load_types(obj, type), err, out);
 	CHECK_ERR(bpf_object__load_progs(obj), err, out);
 
 	return 0;
@@ -1621,7 +1632,45 @@ int bpf_program__nth_fd(struct bpf_program *prog, int n)
 
 void bpf_program__set_type(struct bpf_program *prog, enum bpf_prog_type type)
 {
-	prog->type = type;
+	char *event = prog->section_name;
+	bool is_socket = strncmp(event, "socket", 6) == 0;
+	bool is_kprobe = strncmp(event, "kprobe/", 7) == 0;
+	bool is_kretprobe = strncmp(event, "kretprobe/", 10) == 0;
+	bool is_tracepoint = strncmp(event, "tracepoint/", 11) == 0;
+	bool is_xdp = strncmp(event, "xdp", 3) == 0;
+	bool is_perf_event = strncmp(event, "perf_event", 10) == 0;
+	bool is_cgroup_skb = strncmp(event, "cgroup/skb", 10) == 0;
+	bool is_cgroup_sk = strncmp(event, "cgroup/sock", 11) == 0;
+	bool is_sockops = strncmp(event, "sockops", 7) == 0;
+	bool is_sk_skb = strncmp(event, "sk_skb", 6) == 0;
+	int prog_type;
+
+	if (type) {
+		prog->type = type;
+		return;
+	}
+
+	if (is_socket) {
+		prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
+	} else if (is_kprobe || is_kretprobe) {
+		prog_type = BPF_PROG_TYPE_KPROBE;
+	} else if (is_tracepoint) {
+		prog_type = BPF_PROG_TYPE_TRACEPOINT;
+	} else if (is_xdp) {
+		prog_type = BPF_PROG_TYPE_XDP;
+	} else if (is_perf_event) {
+		prog_type = BPF_PROG_TYPE_PERF_EVENT;
+	} else if (is_cgroup_skb) {
+		prog_type = BPF_PROG_TYPE_CGROUP_SKB;
+	} else if (is_cgroup_sk) {
+		prog_type = BPF_PROG_TYPE_CGROUP_SOCK;
+	} else if (is_sockops) {
+		prog_type = BPF_PROG_TYPE_SOCK_OPS;
+	} else if (is_sk_skb) {
+		prog_type = BPF_PROG_TYPE_SK_SKB;
+	}
+
+	prog->type = prog_type;
 }
 
 static bool bpf_program__is_type(struct bpf_program *prog,
@@ -1751,7 +1800,7 @@ int bpf_prog_load(const char *file, enum bpf_prog_type type,
 {
 	struct bpf_program *prog;
 	struct bpf_object *obj;
-	int err;
+	int err, i;
 
 	obj = bpf_object__open(file);
 	if (IS_ERR(obj))
@@ -1764,13 +1813,16 @@ int bpf_prog_load(const char *file, enum bpf_prog_type type,
 	}
 
 	bpf_program__set_type(prog, type);
-	err = bpf_object__load(obj);
+	err = bpf_object__load(obj, type);
 	if (err) {
 		bpf_object__close(obj);
 		return -EINVAL;
 	}
 
 	*pobj = obj;
-	*prog_fd = bpf_program__fd(prog);
+	for (i = 0; i < obj->nr_programs; i++) {
+		prog = &obj->programs[i];
+		prog_fd[i] =  bpf_program__nth_fd(prog, 0);
+	}
 	return 0;
 }

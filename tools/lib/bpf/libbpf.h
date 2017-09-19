@@ -70,7 +70,7 @@ int bpf_object__pin(struct bpf_object *object, const char *path);
 void bpf_object__close(struct bpf_object *object);
 
 /* Load/unload object into/from kernel */
-int bpf_object__load(struct bpf_object *obj);
+int bpf_object__load(struct bpf_object *obj, enum bpf_prog_type type);
 int bpf_object__unload(struct bpf_object *obj);
 const char *bpf_object__name(struct bpf_object *obj);
 unsigned int bpf_object__kversion(struct bpf_object *obj);
