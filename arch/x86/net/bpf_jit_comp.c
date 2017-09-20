@@ -154,6 +154,11 @@ static bool is_ereg(u32 reg)
 			     BIT(BPF_REG_AX));
 }
 
+static bool is_axreg(u32 reg)
+{
+	return (1 << reg) & BIT(BPF_REG_0);
+}
+
 /* add modifiers if 'reg' maps to x64 registers r8..r15 */
 static u8 add_1mod(u8 byte, u32 reg)
 {
@@ -447,16 +452,46 @@ static int do_jit(struct bpf_prog *bpf_prog, int *addrs, u8 *image,
 			else if (is_ereg(dst_reg))
 				EMIT1(add_1mod(0x40, dst_reg));
 
+			/* b3 holds 'normal' opcode, b2 short form only valid
+			 * in case dst is eax/rax.
+			 */
 			switch (BPF_OP(insn->code)) {
-			case BPF_ADD: b3 = 0xC0; break;
-			case BPF_SUB: b3 = 0xE8; break;
-			case BPF_AND: b3 = 0xE0; break;
-			case BPF_OR: b3 = 0xC8; break;
-			case BPF_XOR: b3 = 0xF0; break;
+			case BPF_ADD:
+				b3 = 0xC0;
+				b2 = 0x05;
+				break;
+			case BPF_SUB:
+				b3 = 0xE8;
+				b2 = 0x2D;
+				break;
+			case BPF_AND:
+				b3 = 0xE0;
+				b2 = 0x25;
+				break;
+			case BPF_OR:
+				b3 = 0xC8;
+				b2 = 0x0D;
+				break;
+			case BPF_XOR:
+				b3 = 0xF0;
+				b2 = 0x35;
+				break;
 			}
 
-			if (is_imm8(imm32))
+			/* optimizations:
+			 *   - if imm32 is 1, use inc/dec when possible
+			 *     to save 1 byte.
+			 *   - if dst register is eax/rax use short form
+			 *     to save 1 byte.
+			 */
+			if (BPF_OP(insn->code) == BPF_ADD && imm32 == 1)
+				EMIT2(0xFF, add_1reg(0xC0, dst_reg));
+			else if (BPF_OP(insn->code) == BPF_SUB && imm32 == 1)
+				EMIT2(0xFF, add_1reg(0xC8, dst_reg));
+			else if (is_imm8(imm32))
 				EMIT3(0x83, add_1reg(b3, dst_reg), imm32);
+			else if (is_axreg(dst_reg))
+				EMIT1_off32(b2, imm32);
 			else
 				EMIT2_off32(0x81, add_1reg(b3, dst_reg), imm32);
 			break;
