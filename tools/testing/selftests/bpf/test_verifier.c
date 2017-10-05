@@ -1037,6 +1037,16 @@ static struct bpf_test tests[] = {
 		.result = REJECT,
 	},
 	{
+		"invalid access __sk_buff dev_scratch",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, dev_scratch)),
+			BPF_EXIT_INSN(),
+		},
+		.errstr = "invalid bpf_context access",
+		.result = REJECT,
+	},
+	{
 		"valid access __sk_buff family",
 		.insns = {
 			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
@@ -1119,6 +1129,16 @@ static struct bpf_test tests[] = {
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
 	},
 	{
+		"valid access __sk_buff dev_scratch",
+		.insns = {
+			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
+				    offsetof(struct __sk_buff, dev_scratch)),
+			BPF_EXIT_INSN(),
+		},
+		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_SK_SKB,
+	},
+	{
 		"invalid access of tc_classid for SK_SKB",
 		.insns = {
 			BPF_LDX_MEM(BPF_W, BPF_REG_0, BPF_REG_1,
@@ -1172,6 +1192,17 @@ static struct bpf_test tests[] = {
 			BPF_EXIT_INSN(),
 		},
 		.result = ACCEPT,
+		.prog_type = BPF_PROG_TYPE_SK_SKB,
+	},
+	{
+		"check skb->dev_scratch is writeable by SK_SKB",
+		.insns = {
+			BPF_MOV64_IMM(BPF_REG_0, 0),
+			BPF_STX_MEM(BPF_W, BPF_REG_1, BPF_REG_0,
+				    offsetof(struct __sk_buff, dev_scratch)),
+			BPF_EXIT_INSN(),
+		},
+		.result =  ACCEPT,
 		.prog_type = BPF_PROG_TYPE_SK_SKB,
 	},
 	{
