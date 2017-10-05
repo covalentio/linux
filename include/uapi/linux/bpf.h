@@ -824,6 +824,7 @@ struct __sk_buff {
 	/* ... here. */
 
 	__u32 data_meta;
+	__u32 dev_scratch;
 };
 
 struct bpf_tunnel_key {

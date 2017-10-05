@@ -3632,6 +3632,7 @@ static bool sk_filter_is_valid_access(int off, int size,
 	case bpf_ctx_range(struct __sk_buff, data_meta):
 	case bpf_ctx_range(struct __sk_buff, data_end):
 	case bpf_ctx_range_till(struct __sk_buff, family, local_port):
+	case bpf_ctx_range(struct __sk_buff, dev_scratch):
 		return false;
 	}
 
@@ -3654,6 +3655,7 @@ static bool lwt_is_valid_access(int off, int size,
 	switch (off) {
 	case bpf_ctx_range(struct __sk_buff, tc_classid):
 	case bpf_ctx_range_till(struct __sk_buff, family, local_port):
+	case bpf_ctx_range(struct __sk_buff, dev_scratch):
 	case bpf_ctx_range(struct __sk_buff, data_meta):
 		return false;
 	}
@@ -3780,6 +3782,7 @@ static bool tc_cls_act_is_valid_access(int off, int size,
 		info->reg_type = PTR_TO_PACKET_END;
 		break;
 	case bpf_ctx_range_till(struct __sk_buff, family, local_port):
+	case bpf_ctx_range(struct __sk_buff, dev_scratch):
 		return false;
 	}
 
@@ -3912,6 +3915,7 @@ static bool sk_skb_is_valid_access(int off, int size,
 
 	if (type == BPF_WRITE) {
 		switch (off) {
+		case bpf_ctx_range(struct __sk_buff, dev_scratch):
 		case bpf_ctx_range(struct __sk_buff, tc_index):
 		case bpf_ctx_range(struct __sk_buff, priority):
 			break;
@@ -4227,6 +4231,16 @@ static u32 bpf_convert_ctx_access(enum bpf_access_type type,
 		*insn++ = BPF_LDX_MEM(BPF_H, si->dst_reg, si->dst_reg,
 				      bpf_target_off(struct sock_common,
 						     skc_num, 2, target_size));
+		break;
+
+	case offsetof(struct __sk_buff, dev_scratch):
+		if (type == BPF_WRITE)
+			*insn++ = BPF_STX_MEM(BPF_W, si->dst_reg, si->src_reg,
+					offsetof(struct sk_buff, dev_scratch));
+		else
+			*insn++ = BPF_LDX_MEM(BPF_W, si->dst_reg, si->src_reg,
+					offsetof(struct sk_buff, dev_scratch));
+		*target_size = 4;
 		break;
 	}
 
