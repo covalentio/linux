@@ -2426,7 +2426,7 @@ static void find_good_pkt_pointers(struct bpf_verifier_state *state,
 			continue;
 		reg = &state->spilled_regs[i / BPF_REG_SIZE];
 		if (reg->type == type && reg->id == dst_reg->id)
-			reg->range = max_t(u16, reg->range, new_range);
+			reg->range = max(reg->range, new_range);
 	}
 }
 
