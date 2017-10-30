@@ -272,14 +272,21 @@ int main(int argc, char **argv)
 		return err;
 	}
 
-	/* Attach to cgroups */
+	/* Attach to cgroups SOCK_OPS hook */
 	err = bpf_prog_attach(prog_fd[2], cg_fd, BPF_CGROUP_SOCK_OPS, 0);
 	if (err) {
-		fprintf(stderr, "ERROR: bpf_prog_attach (groups): %d (%s)\n",
+		fprintf(stderr, "ERROR: bpf_prog_attach (sock_ops): %d (%s)\n",
 			err, strerror(errno));
 		return err;
 	}
 
+	/* Attach to cgroups TCP_SEND hook */
+	err = bpf_prog_attach(prog_fd[3], cg_fd, BPF_CGROUP_TCP_SEND, 0);
+	if (err) {
+		fprintf(stderr, "ERROR: bpf_prog_attach (tcp_send): %d (%s)\n",
+			err, strerror(errno));
+		return err;
+	}
 	err = sockmap_test_sockets(rate, dot);
 	if (err) {
 		fprintf(stderr, "ERROR: test socket failed: %d\n", err);

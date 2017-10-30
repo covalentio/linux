@@ -105,4 +105,18 @@ int bpf_sockmap(struct bpf_sock_ops *skops)
 
 	return 0;
 }
+
+SEC("sk_skb")
+int bpf_prog3(struct __sk_buff *skb)
+{
+	__u32 lport = skb->local_port;
+	__u32 rport = bpf_ntohl(skb->remote_port);
+
+	/* Not practical but good for testing */
+	if (lport == 8888)
+		SK_DROP;
+
+	return SK_PASS;
+}
+
 char _license[] SEC("license") = "GPL";
