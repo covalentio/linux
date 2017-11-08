@@ -62,6 +62,12 @@ static void clsact_chain_head_change(struct tcf_proto *tp_head, void *priv)
 	mini_qdisc_pair_swap(miniqp, tp_head);
 }
 
+static void ingress_select_run_fn(struct Qdisc *qdisc,
+				  struct mini_Qdisc_pair *miniqp)
+{
+	mini_qdisc_pair_set_cbs(miniqp, tcf_classify, NULL);
+}
+
 static int ingress_init(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct ingress_sched_data *q = qdisc_priv(sch);
@@ -121,6 +127,7 @@ static struct Qdisc_ops ingress_qdisc_ops __read_mostly = {
 	.id		=	"ingress",
 	.priv_size	=	sizeof(struct ingress_sched_data),
 	.init		=	ingress_init,
+	.select_run_fn	=	ingress_select_run_fn,
 	.destroy	=	ingress_destroy,
 	.dump		=	ingress_dump,
 	.owner		=	THIS_MODULE,
@@ -229,6 +236,7 @@ static struct Qdisc_ops clsact_qdisc_ops __read_mostly = {
 	.id		=	"clsact",
 	.priv_size	=	sizeof(struct clsact_sched_data),
 	.init		=	clsact_init,
+	.select_run_fn	=	ingress_select_run_fn,
 	.destroy	=	clsact_destroy,
 	.dump		=	ingress_dump,
 	.owner		=	THIS_MODULE,

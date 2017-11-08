@@ -2725,6 +2725,7 @@ F:	net/bpf/
 F:	net/core/filter.c
 F:	net/sched/act_bpf.c
 F:	net/sched/cls_bpf.c
+F:	net/sched/sch_bpf.c
 F:	samples/bpf/
 F:	tools/bpf/
 F:	tools/testing/selftests/bpf/

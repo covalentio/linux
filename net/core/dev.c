@@ -3283,7 +3283,7 @@ sch_handle_egress(struct sk_buff *skb, int *ret, struct net_device *dev)
 	/* qdisc_skb_cb(skb)->pkt_len was already set by the caller. */
 	mini_qdisc_bstats_cpu_update(miniq, skb);
 
-	switch (tcf_classify(skb, miniq->filter_list, &cl_res, false)) {
+	switch (miniq->run(skb, miniq->tp, &cl_res, false)) {
 	case TC_ACT_OK:
 	case TC_ACT_RECLASSIFY:
 		skb->tc_index = TC_H_MIN(cl_res.classid);
@@ -3447,7 +3447,7 @@ static int __dev_queue_xmit(struct sk_buff *skb, void *accel_priv)
 	skb_update_prio(skb);
 
 	qdisc_pkt_len_init(skb);
-#ifdef CONFIG_NET_CLS_ACT
+#ifdef CONFIG_NET_SCH_MINIQ
 	skb->tc_at_ingress = 0;
 # ifdef CONFIG_NET_EGRESS
 	if (static_key_false(&egress_needed)) {
@@ -4188,7 +4188,7 @@ static inline struct sk_buff *
 sch_handle_ingress(struct sk_buff *skb, struct packet_type **pt_prev, int *ret,
 		   struct net_device *orig_dev)
 {
-#ifdef CONFIG_NET_CLS_ACT
+#ifdef CONFIG_NET_SCH_MINIQ
 	struct mini_Qdisc *miniq = rcu_dereference_bh(skb->dev->miniq_ingress);
 	struct tcf_result cl_res;
 
@@ -4209,7 +4209,7 @@ sch_handle_ingress(struct sk_buff *skb, struct packet_type **pt_prev, int *ret,
 	skb->tc_at_ingress = 1;
 	mini_qdisc_bstats_cpu_update(miniq, skb);
 
-	switch (tcf_classify(skb, miniq->filter_list, &cl_res, false)) {
+	switch (miniq->run(skb, miniq->tp, &cl_res, false)) {
 	case TC_ACT_OK:
 	case TC_ACT_RECLASSIFY:
 		skb->tc_index = TC_H_MIN(cl_res.classid);
@@ -4234,7 +4234,7 @@ sch_handle_ingress(struct sk_buff *skb, struct packet_type **pt_prev, int *ret,
 	default:
 		break;
 	}
-#endif /* CONFIG_NET_CLS_ACT */
+#endif /* CONFIG_NET_SCH_MINIQ */
 	return skb;
 }
 
@@ -8045,7 +8045,7 @@ struct netdev_queue *dev_ingress_queue_create(struct net_device *dev)
 {
 	struct netdev_queue *queue = dev_ingress_queue(dev);
 
-#ifdef CONFIG_NET_CLS_ACT
+#ifdef CONFIG_NET_SCH_MINIQ
 	if (queue)
 		return queue;
 	queue = kzalloc(sizeof(*queue), GFP_KERNEL);

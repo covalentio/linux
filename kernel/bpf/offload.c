@@ -140,6 +140,8 @@ static unsigned int bpf_prog_warn_on_exec(const void *ctx,
 int bpf_prog_offload_compile(struct bpf_prog *prog)
 {
 	prog->bpf_func = bpf_prog_warn_on_exec;
+	if (prog->aux->ops->func_offload)
+		prog->bpf_func = prog->aux->ops->func_offload;
 
 	return bpf_prog_offload_translate(prog);
 }

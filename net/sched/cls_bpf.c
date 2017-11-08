@@ -97,10 +97,8 @@ static int cls_bpf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 		int filter_res;
 
 		qdisc_skb_cb(skb)->tc_classid = prog->res.classid;
-
-		if (tc_skip_sw(prog->gen_flags)) {
-			filter_res = prog->exts_integrated ? TC_ACT_UNSPEC : 0;
-		} else if (at_ingress) {
+		/* There's no offload for !prog->exts_integrated. */
+		if (at_ingress) {
 			/* It is safe to push/pull even if skb_shared() */
 			__skb_push(skb, skb->mac_len);
 			bpf_compute_data_pointers(skb);
@@ -148,9 +146,9 @@ static bool cls_bpf_is_ebpf(const struct cls_bpf_prog *prog)
 }
 
 static int cls_bpf_offload_cmd(struct tcf_proto *tp, struct cls_bpf_prog *prog,
-			       enum tc_clsbpf_command cmd)
+			       enum tc_bpf_command cmd)
 {
-	bool addorrep = cmd == TC_CLSBPF_ADD || cmd == TC_CLSBPF_REPLACE;
+	bool addorrep = cmd == TC_BPF_ADD || cmd == TC_BPF_REPLACE;
 	struct tcf_block *block = tp->chain->block;
 	bool skip_sw = tc_skip_sw(prog->gen_flags);
 	struct tc_cls_bpf_offload cls_bpf = {};
@@ -167,7 +165,7 @@ static int cls_bpf_offload_cmd(struct tcf_proto *tp, struct cls_bpf_prog *prog,
 	err = tc_setup_cb_call(block, NULL, TC_SETUP_CLSBPF, &cls_bpf, skip_sw);
 	if (addorrep) {
 		if (err < 0) {
-			cls_bpf_offload_cmd(tp, prog, TC_CLSBPF_DESTROY);
+			cls_bpf_offload_cmd(tp, prog, TC_BPF_DESTROY);
 			return err;
 		} else if (err > 0) {
 			prog->gen_flags |= TCA_CLS_FLAGS_IN_HW;
@@ -184,7 +182,7 @@ static int cls_bpf_offload(struct tcf_proto *tp, struct cls_bpf_prog *prog,
 			   struct cls_bpf_prog *oldprog)
 {
 	struct cls_bpf_prog *obj = prog;
-	enum tc_clsbpf_command cmd;
+	enum tc_bpf_command cmd;
 	bool skip_sw;
 	int ret;
 
@@ -193,17 +191,17 @@ static int cls_bpf_offload(struct tcf_proto *tp, struct cls_bpf_prog *prog,
 
 	if (oldprog && oldprog->offloaded) {
 		if (!tc_skip_hw(prog->gen_flags)) {
-			cmd = TC_CLSBPF_REPLACE;
+			cmd = TC_BPF_REPLACE;
 		} else if (!tc_skip_sw(prog->gen_flags)) {
 			obj = oldprog;
-			cmd = TC_CLSBPF_DESTROY;
+			cmd = TC_BPF_DESTROY;
 		} else {
 			return -EINVAL;
 		}
 	} else {
 		if (tc_skip_hw(prog->gen_flags))
 			return skip_sw ? -EINVAL : 0;
-		cmd = TC_CLSBPF_ADD;
+		cmd = TC_BPF_ADD;
 	}
 
 	ret = cls_bpf_offload_cmd(tp, obj, cmd);
@@ -225,7 +223,7 @@ static void cls_bpf_stop_offload(struct tcf_proto *tp,
 	if (!prog->offloaded)
 		return;
 
-	err = cls_bpf_offload_cmd(tp, prog, TC_CLSBPF_DESTROY);
+	err = cls_bpf_offload_cmd(tp, prog, TC_BPF_DESTROY);
 	if (err) {
 		pr_err("Stopping hardware offload failed: %d\n", err);
 		return;
@@ -240,7 +238,7 @@ static void cls_bpf_offload_update_stats(struct tcf_proto *tp,
 	if (!prog->offloaded)
 		return;
 
-	cls_bpf_offload_cmd(tp, prog, TC_CLSBPF_STATS);
+	cls_bpf_offload_cmd(tp, prog, TC_BPF_STATS);
 }
 
 static int cls_bpf_init(struct tcf_proto *tp)

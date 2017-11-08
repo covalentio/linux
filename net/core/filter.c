@@ -3739,6 +3739,15 @@ static int bpf_unclone_prologue(struct bpf_insn *insn_buf, bool direct_write,
 	return insn - insn_buf;
 }
 
+static unsigned int tc_cls_act_offload(const void *ctx,
+				       const struct bpf_insn *insn)
+{
+	/* When offloaded BPF prog runs in SW context, we don't
+	 * run it again, just bailing out.
+	 */
+	return TC_ACT_UNSPEC;
+}
+
 static int tc_cls_act_prologue(struct bpf_insn *insn_buf, bool direct_write,
 			       const struct bpf_prog *prog)
 {
@@ -4486,6 +4495,7 @@ const struct bpf_verifier_ops tc_cls_act_verifier_ops = {
 
 const struct bpf_prog_ops tc_cls_act_prog_ops = {
 	.test_run		= bpf_prog_test_run_skb,
+	.func_offload		= tc_cls_act_offload,
 };
 
 const struct bpf_verifier_ops xdp_verifier_ops = {

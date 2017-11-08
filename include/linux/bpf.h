@@ -164,6 +164,8 @@ bpf_ctx_record_field_size(struct bpf_insn_access_aux *aux, u32 size)
 struct bpf_prog_ops {
 	int (*test_run)(struct bpf_prog *prog, const union bpf_attr *kattr,
 			union bpf_attr __user *uattr);
+	unsigned int (*func_offload)(const void *ctx,
+				     const struct bpf_insn *insn);
 };
 
 struct bpf_verifier_ops {
