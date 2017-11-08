@@ -17,6 +17,8 @@
 
 struct Qdisc_ops;
 struct qdisc_walker;
+struct mini_Qdisc;
+struct mini_Qdisc_pair;
 struct tcf_walker;
 struct module;
 
@@ -186,6 +188,8 @@ struct Qdisc_ops {
 	struct sk_buff *	(*peek)(struct Qdisc *);
 
 	int			(*init)(struct Qdisc *, struct nlattr *arg);
+	void			(*select_run_fn)(struct Qdisc *qdisc,
+						 struct mini_Qdisc_pair *miniqp);
 	void			(*reset)(struct Qdisc *);
 	void			(*destroy)(struct Qdisc *);
 	int			(*change)(struct Qdisc *, struct nlattr *arg);
@@ -905,13 +909,20 @@ static inline void psched_ratecfg_getrate(struct tc_ratespec *res,
 	res->linklayer = (r->linklayer & TC_LINKLAYER_MASK);
 }
 
-/* Mini Qdisc serves for specific needs of ingress/clsact Qdisc.
+typedef int mini_Qdisc_run_t(struct sk_buff *skb,
+			     const struct tcf_proto *tp,
+			     struct tcf_result *res, bool compat_mode);
+typedef void mini_Qdisc_rcu_t(struct mini_Qdisc *miniq);
+
+/* Mini Qdisc serves for specific needs of ingress/clsact/bpf Qdisc.
  * The fast path only needs to access filter list and to update stats
  */
 struct mini_Qdisc {
-	struct tcf_proto *filter_list;
+	mini_Qdisc_run_t *run;
+	const struct tcf_proto *tp;
 	struct gnet_stats_basic_cpu __percpu *cpu_bstats;
 	struct gnet_stats_queue	__percpu *cpu_qstats;
+	mini_Qdisc_rcu_t *rcu_cb;
 	struct rcu_head rcu;
 };
 
@@ -931,6 +942,24 @@ struct mini_Qdisc_pair {
 	struct mini_Qdisc miniq2;
 	struct mini_Qdisc __rcu **p_miniq;
 };
+
+static inline void
+mini_qdisc_pair_set_cbs(struct mini_Qdisc_pair *miniqp,
+			mini_Qdisc_run_t *run,
+			mini_Qdisc_rcu_t *rcu_cb)
+{
+	miniqp->miniq1.run = run;
+	miniqp->miniq1.rcu_cb = rcu_cb;
+
+	miniqp->miniq2.run = run;
+	miniqp->miniq2.rcu_cb = rcu_cb;
+}
+
+static inline struct mini_Qdisc *
+mini_qdisc_get_active(struct mini_Qdisc_pair *miniqp)
+{
+	return rtnl_dereference(*miniqp->p_miniq);
+}
 
 void mini_qdisc_pair_swap(struct mini_Qdisc_pair *miniqp,
 			  struct tcf_proto *tp_head);

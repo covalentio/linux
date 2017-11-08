@@ -924,4 +924,25 @@ enum {
 
 #define TCA_CBS_MAX (__TCA_CBS_MAX - 1)
 
+/* BPF */
+
+enum {
+	TCA_BPF_PARMS_INGRESS = 1,
+	TCA_BPF_PARMS_EGRESS,
+	__TCA_BPF_SCH_MAX,
+};
+
+#define TCA_BPF_SCH_MAX		(__TCA_BPF_SCH_MAX - 1)
+
+/* Supported sch_bpf flags. */
+#define TCA_BPF_SCH_OFFLOAD	(1ULL << 0)
+
+enum {
+	TCA_BPF_PARMS_PROG = 1,
+	TCA_BPF_PARMS_FLAGS,
+	__TCA_BPF_PARMS_MAX,
+};
+
+#define TCA_BPF_PARMS_MAX	(__TCA_BPF_PARMS_MAX - 1)
+
 #endif

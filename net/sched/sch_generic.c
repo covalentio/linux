@@ -1025,30 +1025,30 @@ void psched_ratecfg_precompute(struct psched_ratecfg *r,
 }
 EXPORT_SYMBOL(psched_ratecfg_precompute);
 
-static void mini_qdisc_rcu_func(struct rcu_head *head)
+static void mini_qdisc_rcu_func(struct rcu_head *rcu)
 {
+	struct mini_Qdisc *miniq = container_of(rcu, struct mini_Qdisc, rcu);
+
+	if (miniq->rcu_cb)
+		miniq->rcu_cb(miniq);
 }
 
 void mini_qdisc_pair_swap(struct mini_Qdisc_pair *miniqp,
 			  struct tcf_proto *tp_head)
 {
 	struct mini_Qdisc *miniq_old = rtnl_dereference(*miniqp->p_miniq);
-	struct mini_Qdisc *miniq;
+	struct mini_Qdisc *miniq = NULL;
 
-	if (!tp_head) {
-		RCU_INIT_POINTER(*miniqp->p_miniq, NULL);
-		return;
-	}
+	if (tp_head)
+		miniq = !miniq_old || miniq_old == &miniqp->miniq2 ?
+			&miniqp->miniq1 : &miniqp->miniq2;
 
-	miniq = !miniq_old || miniq_old == &miniqp->miniq2 ?
-		&miniqp->miniq1 : &miniqp->miniq2;
-
-	/* We need to make sure that readers won't see the miniq
-	 * we are about to modify. So wait until previous call_rcu_bh callback
-	 * is done.
+	/* We need to make sure that readers won't see the miniq we are about
+	 * to modify. So wait until previous call_rcu_bh callback is done.
 	 */
 	rcu_barrier_bh();
-	miniq->filter_list = tp_head;
+	if (miniq)
+		miniq->tp = tp_head;
 	rcu_assign_pointer(*miniqp->p_miniq, miniq);
 
 	if (miniq_old)
@@ -1065,8 +1065,12 @@ void mini_qdisc_pair_init(struct mini_Qdisc_pair *miniqp, struct Qdisc *qdisc,
 {
 	miniqp->miniq1.cpu_bstats = qdisc->cpu_bstats;
 	miniqp->miniq1.cpu_qstats = qdisc->cpu_qstats;
+
 	miniqp->miniq2.cpu_bstats = qdisc->cpu_bstats;
 	miniqp->miniq2.cpu_qstats = qdisc->cpu_qstats;
+
+	qdisc->ops->select_run_fn(qdisc, miniqp);
+
 	miniqp->p_miniq = p_miniq;
 }
 EXPORT_SYMBOL(mini_qdisc_pair_init);

@@ -669,21 +669,33 @@ struct tc_cls_matchall_offload {
 	unsigned long cookie;
 };
 
-enum tc_clsbpf_command {
-	TC_CLSBPF_ADD,
-	TC_CLSBPF_REPLACE,
-	TC_CLSBPF_DESTROY,
-	TC_CLSBPF_STATS,
+enum tc_bpf_command {
+	TC_BPF_ADD,
+	TC_BPF_REPLACE,
+	TC_BPF_DESTROY,
+	TC_BPF_STATS,
 };
 
 struct tc_cls_bpf_offload {
 	struct tc_cls_common_offload common;
-	enum tc_clsbpf_command command;
+	enum tc_bpf_command command;
 	struct tcf_exts *exts;
 	struct bpf_prog *prog;
 	const char *name;
 	bool exts_integrated;
 	u32 gen_flags;
+};
+
+enum tc_sch_bpf_type {
+	TC_SETUP_SCHBPF_UNSPEC,
+	TC_SETUP_SCHBPF_INGRESS,
+	TC_SETUP_SCHBPF_EGRESS,
+};
+
+struct tc_sch_bpf_offload {
+	enum tc_sch_bpf_type type;
+	enum tc_bpf_command command;
+	struct bpf_prog *prog;
 };
 
 struct tc_mqprio_qopt_offload {

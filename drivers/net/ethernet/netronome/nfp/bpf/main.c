@@ -88,6 +88,38 @@ static void nfp_bpf_vnic_free(struct nfp_app *app, struct nfp_net *nn)
 		nfp_bpf_xdp_offload(app, nn, NULL);
 }
 
+static int nfp_bpf_tc_offload(struct nfp_net *nn, enum tc_bpf_command cmd,
+			      struct bpf_prog *prog)
+{
+	if (!tc_can_offload(nn->dp.netdev) ||
+	    !nfp_net_ebpf_capable(nn))
+		return -EOPNOTSUPP;
+	if (nn->dp.bpf_offload_xdp)
+		return -EBUSY;
+
+	switch (cmd) {
+	case TC_BPF_REPLACE:
+		return nfp_net_bpf_offload(nn, prog, true);
+	case TC_BPF_ADD:
+		return nfp_net_bpf_offload(nn, prog, false);
+	case TC_BPF_DESTROY:
+		return nfp_net_bpf_offload(nn, NULL, true);
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+static int nfp_bpf_setup_tc_miniq(struct net_device *netdev,
+				  struct tc_sch_bpf_offload *sch_bpf)
+{
+	struct nfp_net *nn = netdev_priv(netdev);
+
+	if (sch_bpf->type != TC_SETUP_SCHBPF_INGRESS)
+		return -EOPNOTSUPP;
+
+	return nfp_bpf_tc_offload(nn, sch_bpf->command, sch_bpf->prog);
+}
+
 static int nfp_bpf_setup_tc_block_cb(enum tc_setup_type type,
 				     void *type_data, void *cb_priv)
 {
@@ -95,13 +127,9 @@ static int nfp_bpf_setup_tc_block_cb(enum tc_setup_type type,
 	struct nfp_net *nn = cb_priv;
 
 	if (type != TC_SETUP_CLSBPF ||
-	    !tc_can_offload(nn->dp.netdev) ||
-	    !nfp_net_ebpf_capable(nn) ||
 	    cls_bpf->common.protocol != htons(ETH_P_ALL) ||
 	    cls_bpf->common.chain_index)
 		return -EOPNOTSUPP;
-	if (nn->dp.bpf_offload_xdp)
-		return -EBUSY;
 
 	/* Only support TC direct action */
 	if (!cls_bpf->exts_integrated ||
@@ -110,16 +138,7 @@ static int nfp_bpf_setup_tc_block_cb(enum tc_setup_type type,
 		return -EOPNOTSUPP;
 	}
 
-	switch (cls_bpf->command) {
-	case TC_CLSBPF_REPLACE:
-		return nfp_net_bpf_offload(nn, cls_bpf->prog, true);
-	case TC_CLSBPF_ADD:
-		return nfp_net_bpf_offload(nn, cls_bpf->prog, false);
-	case TC_CLSBPF_DESTROY:
-		return nfp_net_bpf_offload(nn, NULL, true);
-	default:
-		return -EOPNOTSUPP;
-	}
+	return nfp_bpf_tc_offload(nn, cls_bpf->command, cls_bpf->prog);
 }
 
 static int nfp_bpf_setup_tc_block(struct net_device *netdev,
@@ -151,6 +170,8 @@ static int nfp_bpf_setup_tc(struct nfp_app *app, struct net_device *netdev,
 	switch (type) {
 	case TC_SETUP_BLOCK:
 		return nfp_bpf_setup_tc_block(netdev, type_data);
+	case TC_SETUP_SCHBPF:
+		return nfp_bpf_setup_tc_miniq(netdev, type_data);
 	default:
 		return -EOPNOTSUPP;
 	}

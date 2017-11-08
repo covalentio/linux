@@ -781,9 +781,11 @@ struct sk_buff {
 	__u8			offload_fwd_mark:1;
 	__u8			offload_mr_fwd_mark:1;
 #endif
+#ifdef CONFIG_NET_SCH_MINIQ
+	__u8			tc_at_ingress:1;
+#endif
 #ifdef CONFIG_NET_CLS_ACT
 	__u8			tc_skip_classify:1;
-	__u8			tc_at_ingress:1;
 	__u8			tc_redirected:1;
 	__u8			tc_from_ingress:1;
 #endif
