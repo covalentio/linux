@@ -4024,7 +4024,8 @@ process_bpf_exit:
 		insn_idx++;
 	}
 
-	verbose(env, "processed %d insns, stack depth %d\n", insn_processed,
+	verbose(env, "processed %d insns, limit %d, stack depth %d\n",
+		insn_processed, BPF_COMPLEXITY_LIMIT_INSNS,
 		env->prog->aux->stack_depth);
 	return 0;
 }
