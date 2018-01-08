@@ -38,6 +38,7 @@
 #include <linux/skbuff.h>
 #include <linux/workqueue.h>
 #include <linux/list.h>
+#include <linux/mm.h>
 #include <net/strparser.h>
 #include <net/tcp.h>
 
@@ -47,6 +48,7 @@
 struct bpf_stab {
 	struct bpf_map map;
 	struct sock **sock_map;
+	struct bpf_prog *bpf_tx_msg;
 	struct bpf_prog *bpf_parse;
 	struct bpf_prog *bpf_verdict;
 };
@@ -74,6 +76,7 @@ struct smap_psock {
 	struct sk_buff *save_skb;
 
 	struct strparser strp;
+	struct bpf_prog *bpf_tx_msg;
 	struct bpf_prog *bpf_parse;
 	struct bpf_prog *bpf_verdict;
 	struct list_head maps;
@@ -88,7 +91,11 @@ struct smap_psock {
 	void (*save_data_ready)(struct sock *sk);
 	void (*save_write_space)(struct sock *sk);
 	void (*save_state_change)(struct sock *sk);
+
+	struct scatterlist sg_data[MAX_SKB_FRAGS];
 };
+
+static void smap_release_sock(struct smap_psock *psock, struct sock *sock);
 
 static inline struct smap_psock *smap_psock_sk(const struct sock *sk)
 {
@@ -99,7 +106,409 @@ enum __sk_action {
 	__SK_DROP = 0,
 	__SK_PASS,
 	__SK_REDIRECT,
+	__SK_NONE,
 };
+
+static int memcopy_from_iter(struct sock *sk, struct scatterlist *sg,
+			     int sg_num, struct iov_iter *from, int bytes)
+{
+	int i, rc = 0;
+
+	for (i = 0; i < sg_num; ++i) {
+		int copy = sg[i].length;
+		char *to = sg_virt(&sg[i]);
+
+		if (sk->sk_route_caps & NETIF_F_NOCACHE_COPY)
+			rc = copy_from_iter_nocache(to, copy, from);
+		else
+			rc = copy_from_iter(to, copy, from);
+
+		if (rc != copy) {
+			rc = -EFAULT;
+			goto out;
+		}
+
+		bytes -= copy;
+		if (!bytes)
+			break;
+	}
+out:
+	return rc;
+}
+
+static int bpf_tcp_push(struct sock *sk, struct scatterlist *sg,
+			int *sg_end, int flags, bool charge)
+{
+	int sendpage_flags = flags | MSG_SENDPAGE_NOTLAST;
+	int offset, ret = 0;
+	struct page *p;
+	size_t size;
+
+	size = sg->length;
+	offset = sg->offset;
+
+	while (1) {
+		if (sg_is_last(sg))
+			sendpage_flags = flags;
+
+		tcp_rate_check_app_limited(sk);
+		p = sg_page(sg);
+retry:
+		ret = do_tcp_sendpages(sk, p, offset, size, sendpage_flags);
+		if (ret != size) {
+			if (ret > 0) {
+				offset += ret;
+				size -= ret;
+				goto retry;
+			}
+
+			if (charge)
+				sk_mem_uncharge(sk,
+						sg->length - size - sg->offset);
+
+			sg->offset = offset;
+			sg->length = size;
+			return ret;
+		}
+
+		put_page(p);
+		if (charge)
+			sk_mem_uncharge(sk, sg->length);
+		*sg_end += 1;
+		sg = sg_next(sg);
+		if (!sg)
+			break;
+
+		offset = sg->offset;
+		size = sg->length;
+	}
+
+	return 0;
+}
+
+static inline void bpf_compute_data_pointers_sg(struct scatterlist *sg,
+						struct sk_msg_buff *md)
+{
+	md->data = sg_virt(sg);
+	md->data_end = md->data + sg->length;
+}
+
+static void return_mem_sg(struct sock *sk, struct scatterlist *sg, int end)
+{
+	int i;
+
+	for (i = 0; i < end; ++i)
+		sk_mem_uncharge(sk, sg[i].length);
+}
+
+static int free_sg(struct sock *sk, struct scatterlist *sg, int start, int len)
+{
+	int i, free = 0;
+
+	for (i = start; i < len; ++i) {
+		free += sg[i].length;
+		sk_mem_uncharge(sk, sg[i].length);
+		put_page(sg_page(&sg[i]));
+	}
+
+	return free;
+}
+
+static unsigned int smap_do_tx_msg(struct sock *sk,
+				   struct smap_psock *psock,
+				   struct sk_msg_buff *md)
+{
+	struct scatterlist *sg;
+	struct bpf_prog *prog;
+	unsigned int rc, _rc;
+
+	preempt_disable();
+	rcu_read_lock();
+
+	sg = psock->sg_data;
+	/* If the policy was removed mid-send then default to 'accept' */
+	prog = READ_ONCE(psock->bpf_tx_msg);
+	if (unlikely(!prog)) {
+		_rc = SK_PASS;
+		goto verdict;
+	}
+
+	bpf_compute_data_pointers_sg(sg, md);
+	_rc = (*prog->bpf_func)(md, prog->insnsi);
+
+verdict:
+	rcu_read_unlock();
+	preempt_enable();
+
+	/* Moving return codes from UAPI namespace into internal namespace */
+	rc = ((_rc == SK_PASS) ?
+	      (md->map ? __SK_REDIRECT : __SK_PASS) :
+	      __SK_DROP);
+
+	return rc;
+}
+
+static int bpf_tcp_sendmsg_do_redirect(struct scatterlist *sg, int sg_num,
+				       struct sk_msg_buff *md, int flags)
+{
+	int i, sg_curr = 0, err, free;
+	struct smap_psock *psock;
+	struct sock *sk;
+
+	rcu_read_lock();
+	sk = do_msg_redirect_map(md);
+	if (unlikely(!sk))
+		goto out_rcu;
+
+	psock = smap_psock_sk(sk);
+	if (unlikely(!psock))
+		goto out_rcu;
+
+	if (!refcount_inc_not_zero(&psock->refcnt))
+		goto out_rcu;
+
+	rcu_read_unlock();
+	lock_sock(sk);
+	err = bpf_tcp_push(sk, sg, &sg_curr, flags, false);
+	if (unlikely(err))
+		goto out;
+	release_sock(sk);
+	smap_release_sock(psock, sk);
+	return 0;
+out_rcu:
+	rcu_read_unlock();
+out:
+	for (i = sg_curr; i < sg_num; ++i) {
+		free += sg[i].length;
+		put_page(sg_page(&sg[i]));
+	}
+	return free;
+}
+
+static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+{
+	int err = 0, eval = __SK_NONE, sg_size = 0, sg_num = 0;
+	int flags = msg->msg_flags | MSG_NO_SHARED_FRAGS;
+	struct sk_msg_buff md = {0};
+	struct smap_psock *psock;
+	size_t copy, copied = 0;
+	struct scatterlist *sg;
+	long timeo;
+
+	/* Its possible a sock event or user removed the psock _but_ the ops
+	 * have not been reprogrammed yet so we get here. In this case fallback
+	 * to tcp_sendmsg. Note this only works because we _only_ ever allow
+	 * a single ULP there is no hierarchy here.
+	 */
+	rcu_read_lock();
+	psock = smap_psock_sk(sk);
+	if (unlikely(!psock)) {
+		rcu_read_unlock();
+		return tcp_sendmsg(sk, msg, size);
+	}
+
+	/* Increment the psock refcnt to ensure its not released while sending a
+	 * message. Required because sg_data and bpf programs are used in
+	 * separate rcu critical sections. Its OK if we lose the map entry
+	 * though the psock will be released once the refcnt hits zero.
+	 */
+	if (!refcount_inc_not_zero(&psock->refcnt)) {
+		rcu_read_unlock();
+		return tcp_sendmsg(sk, msg, size);
+	}
+
+	sg = psock->sg_data;
+	rcu_read_unlock();
+
+	lock_sock(sk);
+	timeo = sock_sndtimeo(sk, msg->msg_flags & MSG_DONTWAIT);
+
+	while (msg_data_left(msg)) {
+		int sg_curr;
+
+		if (sk->sk_err) {
+			err = sk->sk_err;
+			goto out_err;
+		}
+
+		copy = msg_data_left(msg);
+		if (!sk_stream_memory_free(sk))
+			goto wait_for_sndbuf;
+
+		/* sg_size indicates bytes already allocated and sg_num
+		 * is last sg element used. This is used when alloc_sg
+		 * partially allocates a scatterlist and then is sent
+		 * to wait for memory. In normal case (no memory pressure)
+		 * both sg_nun and sg_size are zero.
+		 */
+		copy = copy - sg_size;
+		err = sk_alloc_sg(sk, copy, sg, &sg_num, &sg_size, 0);
+		if (err) {
+			if (err != ENOSPC)
+				goto wait_for_memory;
+			copy = sg_size;
+		}
+
+		err = memcopy_from_iter(sk, sg, sg_num, &msg->msg_iter, copy);
+		if (err < 0) {
+			free_sg(sk, sg, 0, sg_num);
+			goto out_err;
+		}
+
+		copied += copy;
+
+		/* If msg is larger than MAX_SKB_FRAGS we can send multiple
+		 * scatterlists per msg. However BPF decisions apply to the
+		 * entire msg.
+		 */
+		if (eval == __SK_NONE)
+			eval = smap_do_tx_msg(sk, psock, &md);
+
+		switch (eval) {
+		case __SK_PASS:
+			sg_mark_end(sg + sg_num - 1);
+			err = bpf_tcp_push(sk, sg, &sg_curr, flags, true);
+			if (unlikely(err)) {
+				copied -= free_sg(sk, sg, sg_curr, sg_num);
+				goto out_err;
+			}
+			break;
+		case __SK_REDIRECT:
+			copied += copy;
+			sg_mark_end(sg + sg_num - 1);
+			goto do_redir;
+		case __SK_DROP:
+		default:
+			copied -= free_sg(sk, sg, 0, sg_num);
+			goto out_err;
+		}
+
+
+		sg_num = 0;
+		sg_size = 0;
+		continue;
+wait_for_sndbuf:
+		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
+wait_for_memory:
+		err = sk_stream_wait_memory(sk, &timeo);
+		if (err)
+			goto out_err;
+	}
+out_err:
+	if (err < 0)
+		err = sk_stream_error(sk, msg->msg_flags, err);
+	release_sock(sk);
+	smap_release_sock(psock, sk);
+	return copied ? copied : err;
+
+do_redir:
+	/* To avoid deadlock with multiple socks all doing redirects to
+	 * each other we must first drop the current sock lock and release
+	 * the psock. Then get the redirect socket (assuming it still
+	 * exists), take it's lock, and finally do the send here. If the
+	 * redirect fails there is nothing to do, we don't want to blame
+	 * the sender for remote socket failures. Instead we simply
+	 * continue making forward progress.
+	 */
+	return_mem_sg(sk, sg, sg_num);
+	release_sock(sk);
+	smap_release_sock(psock, sk);
+	copied -= bpf_tcp_sendmsg_do_redirect(sg, sg_num, &md, flags);
+	return copied;
+}
+
+static int bpf_tcp_sendpage(struct sock *sk, struct page *page,
+			    int offset, size_t size, int flags)
+{
+	struct smap_psock *psock;
+	int rc, _rc = __SK_PASS;
+	struct bpf_prog *prog;
+	struct sk_msg_buff md;
+
+	preempt_disable();
+	rcu_read_lock();
+	psock = smap_psock_sk(sk);
+	if (unlikely(!psock))
+		goto verdict;
+
+	/* If the policy was removed mid-send then default to 'accept' */
+	prog = READ_ONCE(psock->bpf_tx_msg);
+	if (unlikely(!prog))
+		goto verdict;
+
+	/* Calculate pkt data pointers and run BPF program */
+	md.data = page_address(page) + offset;
+	md.data_end = md.data + size;
+	_rc = (*prog->bpf_func)(&md, prog->insnsi);
+
+verdict:
+	rcu_read_unlock();
+	preempt_enable();
+
+	/* Moving return codes from UAPI namespace into internal namespace */
+	rc = ((_rc == SK_PASS) ? __SK_PASS : __SK_DROP);
+
+	switch (rc) {
+	case __SK_PASS:
+		lock_sock(sk);
+		rc = tcp_sendpage_locked(sk, page, offset, size, flags);
+		release_sock(sk);
+		break;
+	case __SK_REDIRECT:
+	/* Fall through and free skb no redirect support yet */
+	case __SK_DROP:
+	default:
+		rc = -EACCES;
+	}
+
+	return rc;
+}
+
+static int bpf_tcp_msg_add(struct smap_psock *psock,
+			   struct sock *sk,
+			   struct bpf_prog *tx_msg)
+{
+	struct bpf_prog *orig_tx_msg;
+
+	orig_tx_msg = xchg(&psock->bpf_tx_msg, tx_msg);
+	if (orig_tx_msg)
+		bpf_prog_put(orig_tx_msg);
+
+	/* Only place sg_data may be touched outside of sock lock, this works
+	 * because this psock instance has not been placed in map and can not
+	 * be referenced yet.
+	 */
+	sg_init_table(psock->sg_data, MAX_SKB_FRAGS);
+	return tcp_set_ulp_id(sk, TCP_ULP_BPF);
+}
+
+struct proto tcp_bpf_proto;
+static int bpf_tcp_init(struct sock *sk)
+{
+	sk->sk_prot = &tcp_bpf_proto;
+	return 0;
+}
+
+static void bpf_tcp_release(struct sock *sk)
+{
+	sk->sk_prot = &tcp_prot;
+}
+
+static struct tcp_ulp_ops bpf_tcp_ulp_ops __read_mostly = {
+	.name			= "bpf_tcp",
+	.uid			= TCP_ULP_BPF,
+	.owner			= NULL,
+	.init			= bpf_tcp_init,
+	.release		= bpf_tcp_release,
+};
+
+static int bpf_tcp_ulp_register(void)
+{
+	tcp_bpf_proto = tcp_prot;
+	tcp_bpf_proto.sendmsg = bpf_tcp_sendmsg;
+	tcp_bpf_proto.sendpage = bpf_tcp_sendpage;
+	return tcp_register_ulp(&bpf_tcp_ulp_ops);
+}
 
 static int smap_verdict_func(struct smap_psock *psock, struct sk_buff *skb)
 {
@@ -164,8 +573,6 @@ static void smap_report_sk_error(struct smap_psock *psock, int err)
 	sk->sk_err = err;
 	sk->sk_error_report(sk);
 }
-
-static void smap_release_sock(struct smap_psock *psock, struct sock *sock);
 
 /* Called with lock_sock(sk) held */
 static void smap_state_change(struct sock *sk)
@@ -317,6 +724,7 @@ static void smap_write_space(struct sock *sk)
 
 static void smap_stop_sock(struct smap_psock *psock, struct sock *sk)
 {
+	tcp_cleanup_ulp(sk);
 	if (!psock->strp_enabled)
 		return;
 	sk->sk_data_ready = psock->save_data_ready;
@@ -384,7 +792,6 @@ static int smap_parse_func_strparser(struct strparser *strp,
 	return rc;
 }
 
-
 static int smap_read_sock_done(struct strparser *strp, int err)
 {
 	return err;
@@ -451,11 +858,15 @@ static void smap_gc_work(struct work_struct *w)
 	cancel_work_sync(&psock->tx_work);
 	__skb_queue_purge(&psock->rxqueue);
 
-	/* At this point all strparser and xmit work must be complete */
+	/* At this point all strparser and xmit work must be complete however
+	 * an outstanding scatterlist reference may still be in-flight
+	 */
 	if (psock->bpf_parse)
 		bpf_prog_put(psock->bpf_parse);
 	if (psock->bpf_verdict)
 		bpf_prog_put(psock->bpf_verdict);
+	if (psock->bpf_tx_msg)
+		bpf_prog_put(psock->bpf_tx_msg);
 
 	list_for_each_entry_safe(e, tmp, &psock->maps, list) {
 		list_del(&e->list);
@@ -491,8 +902,7 @@ static struct smap_psock *smap_init_psock(struct sock *sock,
 
 static struct bpf_map *sock_map_alloc(union bpf_attr *attr)
 {
-	struct bpf_stab *stab;
-	int err = -EINVAL;
+	struct bpf_stab *stab; int err = -EINVAL;
 	u64 cost;
 
 	if (!capable(CAP_NET_ADMIN))
@@ -505,6 +915,10 @@ static struct bpf_map *sock_map_alloc(union bpf_attr *attr)
 
 	if (attr->value_size > KMALLOC_MAX_SIZE)
 		return ERR_PTR(-E2BIG);
+
+	err = bpf_tcp_ulp_register();
+	if (err && err != -EEXIST)
+		return ERR_PTR(err);
 
 	stab = kzalloc(sizeof(*stab), GFP_USER);
 	if (!stab)
@@ -590,6 +1004,8 @@ static void sock_map_free(struct bpf_map *map)
 		bpf_prog_put(stab->bpf_verdict);
 	if (stab->bpf_parse)
 		bpf_prog_put(stab->bpf_parse);
+	if (stab->bpf_tx_msg)
+		bpf_prog_put(stab->bpf_tx_msg);
 
 	sock_map_remove_complete(stab);
 }
@@ -684,7 +1100,7 @@ static int sock_map_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 {
 	struct bpf_stab *stab = container_of(map, struct bpf_stab, map);
 	struct smap_psock_map_entry *e = NULL;
-	struct bpf_prog *verdict, *parse;
+	struct bpf_prog *verdict, *parse, *tx_msg;
 	struct sock *osock, *sock;
 	struct smap_psock *psock;
 	u32 i = *(u32 *)key;
@@ -710,6 +1126,7 @@ static int sock_map_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 	 */
 	verdict = READ_ONCE(stab->bpf_verdict);
 	parse = READ_ONCE(stab->bpf_parse);
+	tx_msg = READ_ONCE(stab->bpf_tx_msg);
 
 	if (parse && verdict) {
 		/* bpf prog refcnt may be zero if a concurrent attach operation
@@ -728,6 +1145,17 @@ static int sock_map_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 		}
 	}
 
+	if (tx_msg) {
+		tx_msg = bpf_prog_inc_not_zero(stab->bpf_tx_msg);
+		if (IS_ERR(tx_msg)) {
+			if (verdict)
+				bpf_prog_put(verdict);
+			if (parse)
+				bpf_prog_put(parse);
+			return PTR_ERR(tx_msg);
+		}
+	}
+
 	write_lock_bh(&sock->sk_callback_lock);
 	psock = smap_psock_sk(sock);
 
@@ -742,7 +1170,14 @@ static int sock_map_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 			err = -EBUSY;
 			goto out_progs;
 		}
-		refcount_inc(&psock->refcnt);
+		if (READ_ONCE(psock->bpf_tx_msg) && tx_msg) {
+			err = -EBUSY;
+			goto out_progs;
+		}
+		if (!refcount_inc_not_zero(&psock->refcnt)) {
+			err = -EAGAIN;
+			goto out_progs;
+		}
 	} else {
 		psock = smap_init_psock(sock, stab);
 		if (IS_ERR(psock)) {
@@ -763,6 +1198,12 @@ static int sock_map_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 	/* 3. At this point we have a reference to a valid psock that is
 	 * running. Attach any BPF programs needed.
 	 */
+	if (tx_msg) {
+		err = bpf_tcp_msg_add(psock, sock, tx_msg);
+		if (err)
+			goto out_free;
+	}
+
 	if (parse && verdict && !psock->strp_enabled) {
 		err = smap_init_sock(psock, sock);
 		if (err)
@@ -798,6 +1239,8 @@ out_progs:
 		bpf_prog_put(verdict);
 	if (parse)
 		bpf_prog_put(parse);
+	if (tx_msg)
+		bpf_prog_put(tx_msg);
 	write_unlock_bh(&sock->sk_callback_lock);
 	kfree(e);
 	return err;
@@ -812,6 +1255,9 @@ int sock_map_prog(struct bpf_map *map, struct bpf_prog *prog, u32 type)
 		return -EINVAL;
 
 	switch (type) {
+	case BPF_SK_MSG_VERDICT:
+		orig = xchg(&stab->bpf_tx_msg, prog);
+		break;
 	case BPF_SK_SKB_STREAM_PARSER:
 		orig = xchg(&stab->bpf_parse, prog);
 		break;
