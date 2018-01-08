@@ -8,7 +8,7 @@ HOSTCFLAGS += -I$(objtree)/usr/include
 HOSTCFLAGS += -I$(srctree)/tools/lib/
 HOSTCFLAGS += -I$(srctree)/tools/testing/selftests/bpf/
 HOSTCFLAGS += -I$(srctree)/tools/lib/ -I$(srctree)/tools/include
-HOSTCFLAGS += -I$(srctree)/tools/perf
+HOSTCFLAGS += -I$(srctree)/tools/perf -g
 
 sockmap-objs := ../bpf/bpf_load.o $(LIBBPF) sockmap_user.o
 
