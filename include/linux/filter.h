@@ -510,6 +510,7 @@ struct xdp_buff {
 struct sk_msg_buff {
 	void *data;
 	void *data_end;
+	int apply_bytes;
 	int sg_start;
 	int sg_curr;
 	int sg_end;
