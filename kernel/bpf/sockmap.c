@@ -78,7 +78,9 @@ struct smap_psock {
 	/* datapath variables for tx_msg ULP */
 	struct sock *sk_redir;
 	int apply_bytes;
+	int cork_bytes;
 	int eval;
+	struct sk_msg_buff *cork;
 
 	struct strparser strp;
 	struct bpf_prog *bpf_tx_msg;
@@ -204,8 +206,9 @@ static int memcopy_from_iter(struct sock *sk,
 		int copy;
 		char *to;
 
-		copy = sg[i].length;
-		to = sg_virt(&sg[i]);
+		copy = sg[i].length - md->sg_copybreak;
+		to = sg_virt(&sg[i]) + md->sg_copybreak;
+		md->sg_copybreak += copy;
 
 		if (sk->sk_route_caps & NETIF_F_NOCACHE_COPY)
 			rc = copy_from_iter_nocache(to, copy, from);
@@ -221,6 +224,7 @@ static int memcopy_from_iter(struct sock *sk,
 		if (!bytes)
 			break;
 
+		md->sg_copybreak = 0;
 		if (++i == MAX_SKB_FRAGS)
 			i = 0;
 	} while (i != md->sg_end);
@@ -408,12 +412,14 @@ verdict:
 }
 
 static int bpf_tcp_sendmsg_do_redirect(struct sock *sk,
-				       struct scatterlist *sg,
 				       struct sk_msg_buff *md,
 				       int flags)
 {
 	struct smap_psock *psock;
+	struct scatterlist *sg;
 	int i, err, free = 0;
+
+	sg = md->sg_data;
 
 	rcu_read_lock();
 	psock = smap_psock_sk(sk);
@@ -496,6 +502,9 @@ static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 	md.sg_size = 0;
 
 	while (msg_data_left(msg)) {
+		struct sk_msg_buff *m, *cork;
+		bool enospc = false;
+
 		if (sk->sk_err) {
 			err = sk->sk_err;
 			goto out_err;
@@ -511,41 +520,84 @@ static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 		 * to wait for memory. In normal case (no memory pressure)
 		 * both sg_num and sg_size are zero.
 		 */
-		copy = copy - md.sg_size;
-		md.sg_curr = md.sg_end;
-		err = sk_alloc_sg(sk, copy, sg, md.sg_start, &md.sg_end, &md.sg_size, md.sg_end);
+		m = psock->cork ?: &md;
+		copy = copy - m->sg_size;
+		m->sg_curr = m->sg_copybreak ? m->sg_curr : m->sg_end;
+		err = sk_alloc_sg(sk, copy, m->sg_data, m->sg_start, &m->sg_end, &m->sg_size, m->sg_end - 1);
 		if (err) {
 			if (err != -ENOSPC)
 				goto wait_for_memory;
+			enospc = true;
 			copy = md.sg_size;
 		}
 
-		err = memcopy_from_iter(sk, &md, &msg->msg_iter, copy);
+		err = memcopy_from_iter(sk, m, &msg->msg_iter, copy);
 		if (err < 0) {
-			free_curr_sg(sk, &md);
+			free_curr_sg(sk, m);
 			goto out_err;
 		}
 
 		copied += copy;
+
+		/* When bytes are being corked skip running BPF program and
+		 * applying verdict unless there is no more buffer space. In
+		 * the ENOSPC case case simply run BPF prorgram with currently
+		 * accumulated data. We don't have much choice at this point
+		 * we could try extending the page frags or chaining complex
+		 * frags but even in these cases _eventually_ we will hit an
+		 * OOM scenario. More complex recovery schemes may be
+		 * implemented in the future, but BPF programs must handle
+		 * the case where apply_cork requests are not honored. The
+		 * canonical method to verify this is to check data length.
+		 */
+		if (psock->cork_bytes) {
+			if (psock->cork_bytes > copy)
+				psock->cork_bytes = 0;
+			else
+				psock->cork_bytes -= copy;
+
+			if (psock->cork_bytes && !enospc) {
+				m->sg_size = 0;
+				goto out_cork;
+			}
+		}
+
 more_data:
 		/* If msg is larger than MAX_SKB_FRAGS we can send multiple
 		 * scatterlists per msg. However BPF decisions apply to the
 		 * entire msg.
 		 */
 		if (psock->eval == __SK_NONE)
-			psock->eval = smap_do_tx_msg(sk, psock, &md);
+			psock->eval = smap_do_tx_msg(sk, psock, m);
+
+		if (md.cork_bytes && !enospc) {
+			if (md.cork_bytes < copied)
+				break;
+			psock->cork_bytes = md.cork_bytes - copied;
+			if (!psock->cork) {
+				psock->cork = kcalloc(1, sizeof(struct sk_msg_buff), GFP_KERNEL);
+				if (!psock->cork) {
+					err = -ENOMEM;
+					goto out_err;
+				}
+
+				memcpy(psock->cork, &md, sizeof(md));
+			}
+			psock->cork->sg_size = 0;
+			goto out_cork;
+		}
 
 		switch (psock->eval) {
 		case __SK_PASS:
-			sg_mark_end(md.sg_data + md.sg_end - 1);
-			err = bpf_tcp_push(sk, psock, &md, flags, true);
+			sg_mark_end(m->sg_data + m->sg_end - 1);
+			err = bpf_tcp_push(sk, psock, m, flags, true);
 			if (unlikely(err)) {
-				copied -= free_start_sg(sk, &md);
+				copied -= free_start_sg(sk, m);
 				goto out_err;
 			}
 			break;
 		case __SK_REDIRECT:
-			sg_mark_end(md.sg_data + md.sg_end - 1);
+			sg_mark_end(m->sg_data + m->sg_end - 1);
 			/* To avoid deadlock with multiple socks all doing redirects to
 			 * each other we must first drop the current sock lock and release
 			 * the psock. Then get the redirect socket (assuming it still
@@ -554,24 +606,34 @@ more_data:
 			 * the sender for remote socket failures. Instead we simply
 			 * continue making forward progress.
 			 */
-			return_mem_sg(sk, psock, &md);
+			return_mem_sg(sk, psock, m);
+			cork = psock->cork;
+			psock->cork = NULL;
 			release_sock(sk);
-			err = bpf_tcp_sendmsg_do_redirect(psock->sk_redir, sg, &md, flags);
+			err = bpf_tcp_sendmsg_do_redirect(psock->sk_redir, m, flags);
 			if (err) {
 				copied -= err;
 				goto out_redir;
 			}
+			if (cork)
+				kfree(cork);
 			lock_sock(sk);
 			break;
 		case __SK_DROP:
 		default:
-			copied -= free_start_sg(sk, &md);
+			copied -= free_start_sg(sk, m);
 			goto out_err;
 		}
 
-		bpf_md_init(psock, &md);
-		if (sg[md.sg_start].page_link && sg[md.sg_start].length) {
+		bpf_md_init(psock, m);
+		if (sg[m->sg_start].page_link && sg[m->sg_start].length) {
 			goto more_data;
+		}
+
+		if (psock->cork) {
+			kfree(psock->cork);
+			psock->cork = NULL;
+			psock->cork_bytes = 0;
 		}
 		continue;
 wait_for_sndbuf:
@@ -589,6 +651,10 @@ out_err:
 out_redir:
 	smap_release_sock(psock, sk);
 	return copied ? copied : err;
+out_cork:
+	release_sock(sk);
+	smap_release_sock(psock, sk);
+	return copied;
 }
 
 static int bpf_tcp_sendpage_do_redirect(struct sock *sk,
@@ -1010,6 +1076,12 @@ static void smap_gc_work(struct work_struct *w)
 		bpf_prog_put(psock->bpf_verdict);
 	if (psock->bpf_tx_msg)
 		bpf_prog_put(psock->bpf_tx_msg);
+
+	/* Free any outstanding memory */
+	if (psock->cork) {
+		free_start_sg(psock->sock, psock->cork);
+		kfree(psock->cork);
+	}
 
 	list_for_each_entry_safe(e, tmp, &psock->maps, list) {
 		list_del(&e->list);
