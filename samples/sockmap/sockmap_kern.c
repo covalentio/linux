@@ -64,6 +64,13 @@ struct bpf_map_def SEC("maps") sock_apply_bytes = {
 	.max_entries = 1
 };
 
+struct bpf_map_def SEC("maps") sock_cork_bytes = {
+	.type = BPF_MAP_TYPE_ARRAY,
+	.key_size = sizeof(int),
+	.value_size = sizeof(int),
+	.max_entries = 1
+};
+
 SEC("sk_skb1")
 int bpf_prog1(struct __sk_buff *skb)
 {
@@ -174,6 +181,23 @@ int bpf_prog8(struct sk_msg_md *msg)
 	bytes = bpf_map_lookup_elem(&sock_apply_bytes, &zero);
 	if (bytes) {
 		ret = bpf_msg_apply_bytes(msg, *bytes);
+		if (ret)
+			return SK_DROP;
+	}
+	return SK_PASS;
+}
+SEC("sk_msg6")
+int bpf_prog9(struct sk_msg_md *msg)
+{
+	void *data_end = (void *)(long) msg->data_end;
+	void *data = (void *)(long) msg->data;
+	int ret = 0, *bytes, zero = 0;
+
+	bytes = bpf_map_lookup_elem(&sock_cork_bytes, &zero);
+	if (bytes) {
+		if (((__u32)data_end - (__u32)data) >= *bytes)
+			return SK_PASS;
+		ret = bpf_msg_cork_bytes(msg, *bytes);
 		if (ret)
 			return SK_DROP;
 	}

@@ -465,7 +465,7 @@ static void test_devmap(int task, void *data)
 static void test_sockmap(int tasks, void *data)
 {
 	struct bpf_map *bpf_map_rx, *bpf_map_tx, *bpf_map_msg, *bpf_map_break;
-	int one = 1, map_fd_rx = 0, map_fd_tx = 0, map_fd_break, s, sc, rc;
+	int one = 1, map_fd_msg = 0, map_fd_rx = 0, map_fd_tx = 0, map_fd_break, s, sc, rc;
 	int ports[] = {50200, 50201, 50202, 50204};
 	int err, i, fd, udp, sfd[6] = {0xdeadbeef};
 	u8 buf[20] = {0x0, 0x5, 0x3, 0x2, 0x1, 0x0};
