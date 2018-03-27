@@ -73,7 +73,7 @@ static int (*bpf_getsockopt)(void *ctx, int level, int optname, void *optval,
 	(void *) BPF_FUNC_getsockopt;
 static int (*bpf_sock_ops_cb_flags_set)(void *ctx, int flags) =
 	(void *) BPF_FUNC_sock_ops_cb_flags_set;
-static int (*bpf_sk_redirect_map)(void *ctx, void *map, int key, int flags) =
+static int (*bpf_sk_redirect_map)(void *ctx, void *map, void *key, int flags) =
 	(void *) BPF_FUNC_sk_redirect_map;
 static int (*bpf_sock_map_update)(void *map, void *key, void *value,
 				  unsigned long long flags) =
@@ -86,7 +86,7 @@ static int (*bpf_perf_prog_read_value)(void *ctx, void *buf,
 	(void *) BPF_FUNC_perf_prog_read_value;
 static int (*bpf_override_return)(void *ctx, unsigned long rc) =
 	(void *) BPF_FUNC_override_return;
-static int (*bpf_msg_redirect_map)(void *ctx, void *map, int key, int flags) =
+static int (*bpf_msg_redirect_map)(void *ctx, void *map, void *key, int flags) =
 	(void *) BPF_FUNC_msg_redirect_map;
 static int (*bpf_msg_apply_bytes)(void *ctx, int len) =
 	(void *) BPF_FUNC_msg_apply_bytes;
@@ -94,6 +94,15 @@ static int (*bpf_msg_cork_bytes)(void *ctx, int len) =
 	(void *) BPF_FUNC_msg_cork_bytes;
 static int (*bpf_msg_pull_data)(void *ctx, int start, int end, int flags) =
 	(void *) BPF_FUNC_msg_pull_data;
+static int (*bpf_sock_hash_update)(void *map, void *key, void *value,
+				   unsigned long long flags) =
+	(void *) BPF_FUNC_sock_hash_update;
+static int (*bpf_msg_redirect_hash)(void *map, void *key, void *value,
+				    unsigned long long flags) =
+	(void *) BPF_FUNC_msg_redirect_hash;
+static int (*bpf_sk_redirect_hash)(void *map, void *key, void *value,
+				    unsigned long long flags) =
+	(void *) BPF_FUNC_sk_redirect_hash;
 
 /* llvm builtin functions that eBPF C program may use to
  * emit BPF_LD_ABS and BPF_LD_IND instructions
