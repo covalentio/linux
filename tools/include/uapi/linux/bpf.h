@@ -115,6 +115,7 @@ enum bpf_map_type {
 	BPF_MAP_TYPE_DEVMAP,
 	BPF_MAP_TYPE_SOCKMAP,
 	BPF_MAP_TYPE_CPUMAP,
+	BPF_MAP_TYPE_SOCKHASH,
 };
 
 enum bpf_prog_type {
@@ -821,7 +822,10 @@ union bpf_attr {
 	FN(msg_apply_bytes),		\
 	FN(msg_cork_bytes),		\
 	FN(msg_pull_data),		\
-	FN(bind),
+	FN(bind),			\
+	FN(sock_hash_update),		\
+	FN(msg_redirect_hash),		\
+	FN(sk_redirect_hash),
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
  * function eBPF program intends to call
