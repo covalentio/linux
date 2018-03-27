@@ -262,6 +262,7 @@ static void bpf_map_put_uref(struct bpf_map *map)
 			bpf_fd_array_map_clear(map);
 			break;
 		case BPF_MAP_TYPE_SOCKMAP:
+		case BPF_MAP_TYPE_SOCKHASH:
 			sock_map_release(map);
 			break;
 		default:
