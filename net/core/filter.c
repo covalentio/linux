@@ -1858,9 +1858,8 @@ BPF_CALL_4(bpf_sk_redirect_map, struct sk_buff *, skb,
 	if (unlikely(flags & ~(BPF_F_INGRESS)))
 		return SK_DROP;
 
-	tcb->bpf.key = key;
 	tcb->bpf.flags = flags;
-	tcb->bpf.map = map;
+	tcb->bpf.sk = __sock_map_lookup_elem(map, key);
 
 	return SK_PASS;
 }
@@ -1868,16 +1867,8 @@ BPF_CALL_4(bpf_sk_redirect_map, struct sk_buff *, skb,
 struct sock *do_sk_redirect_map(struct sk_buff *skb)
 {
 	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
-	struct sock *sk = NULL;
 
-	if (tcb->bpf.map) {
-		sk = __sock_map_lookup_elem(tcb->bpf.map, tcb->bpf.key);
-
-		tcb->bpf.key = 0;
-		tcb->bpf.map = NULL;
-	}
-
-	return sk;
+	return tcb->bpf.sk;
 }
 
 static const struct bpf_func_proto bpf_sk_redirect_map_proto = {
@@ -1897,25 +1888,15 @@ BPF_CALL_4(bpf_msg_redirect_map, struct sk_msg_buff *, msg,
 	if (unlikely(flags & ~(BPF_F_INGRESS)))
 		return SK_DROP;
 
-	msg->key = key;
 	msg->flags = flags;
-	msg->map = map;
+	msg->sk = __sock_map_lookup_elem(map, key);
 
 	return SK_PASS;
 }
 
 struct sock *do_msg_redirect_map(struct sk_msg_buff *msg)
 {
-	struct sock *sk = NULL;
-
-	if (msg->map) {
-		sk = __sock_map_lookup_elem(msg->map, msg->key);
-
-		msg->key = 0;
-		msg->map = NULL;
-	}
-
-	return sk;
+	return msg->sk;
 }
 
 static const struct bpf_func_proto bpf_msg_redirect_map_proto = {
