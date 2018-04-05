@@ -1005,12 +1005,31 @@ bpf_object__create_maps(struct bpf_object *obj)
 		struct bpf_map_def *def = &obj->maps[i].def;
 		int *pfd = &obj->maps[i].fd;
 
-		*pfd = bpf_create_map_name(def->type,
-					   obj->maps[i].name,
-					   def->key_size,
-					   def->value_size,
-					   def->max_entries,
-					   def->map_flags);
+		if (def->pinned == PIN_GLOBAL_NS) {
+			const char *mnt = BPF_DIR_MNT;
+			char pathname[PATH_MAX] = {};
+			struct statfs st_fs;
+			int len = PATH_MAX;
+
+			if (statfs(mnt, &st_fs) < 0)
+				return -ENOENT;
+			if ((unsigned long)st_fs.f_type != BPF_FS_MAGIC)
+				return -ENOENT;
+
+			snprintf(pathname, len, "%s/%s/%s", mnt, BPF_DIR_GLOBALS, bpf_map__name(&obj->maps[i]));
+			*pfd = bpf_obj_get(pathname);
+			printf("%s: pin @ %s %i\n", __func__, pathname, *pfd);
+		}
+
+		if (*pfd < 0) {
+			*pfd = bpf_create_map_name(def->type,
+						   obj->maps[i].name,
+						   def->key_size,
+						   def->value_size,
+						   def->max_entries,
+						   def->map_flags);
+		}
+
 		if (*pfd < 0) {
 			size_t j;
 			int err = *pfd;
@@ -1023,6 +1042,7 @@ bpf_object__create_maps(struct bpf_object *obj)
 			return err;
 		}
 		pr_debug("create map %s: fd=%d\n", obj->maps[i].name, *pfd);
+		printf("%s: %s: pined %i fd %i\n", __func__, bpf_map__name(&obj->maps[i]),  def->pinned, *pfd);
 	}
 
 	return 0;
@@ -1433,6 +1453,7 @@ int bpf_object__load(struct bpf_object *obj)
 
 	obj->loaded = true;
 
+	printf("%s: crete maps\n", __func__);
 	CHECK_ERR(bpf_object__create_maps(obj), err, out);
 	CHECK_ERR(bpf_object__relocate(obj), err, out);
 	CHECK_ERR(bpf_object__load_progs(obj), err, out);
