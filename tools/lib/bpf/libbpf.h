@@ -202,6 +202,14 @@ bool bpf_program__is_sched_act(struct bpf_program *prog);
 bool bpf_program__is_xdp(struct bpf_program *prog);
 bool bpf_program__is_perf_event(struct bpf_program *prog);
 
+/* Object pinning settings */
+#define PIN_NONE		0
+#define PIN_OBJECT_NS		1
+#define PIN_GLOBAL_NS		2
+
+#define BPF_DIR_GLOBALS	"globals"
+#define BPF_DIR_MNT	"/sys/fs/bpf/tc"
+
 /*
  * We don't need __attribute__((packed)) now since it is
  * unnecessary for 'bpf_map_def' because they are all aligned.
@@ -214,6 +222,8 @@ struct bpf_map_def {
 	unsigned int value_size;
 	unsigned int max_entries;
 	unsigned int map_flags;
+	unsigned int id;
+	unsigned int pinned;
 };
 
 /*
