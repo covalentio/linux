@@ -175,6 +175,7 @@ int bpf_load_program_xattr(const struct bpf_load_program_attr *load_attr,
 	if (fd >= 0 || !log_buf || !log_buf_sz)
 		return fd;
 
+	printf("%s: fd %i prog_type %i expected attach type %i\n", __func__, fd, attr.prog_type, attr.expected_attach_type);
 	/* Try again with log */
 	attr.log_buf = ptr_to_u64(log_buf);
 	attr.log_size = log_buf_sz;
@@ -288,10 +289,15 @@ int bpf_obj_get(const char *pathname)
 {
 	union bpf_attr attr;
 
+	int err;
+
 	bzero(&attr, sizeof(attr));
 	attr.pathname = ptr_to_u64((void *)pathname);
 
-	return sys_bpf(BPF_OBJ_GET, &attr, sizeof(attr));
+	printf("%s: attr bpf fd %i flags %i\n", __func__, attr.bpf_fd, attr.file_flags);
+	err = sys_bpf(BPF_OBJ_GET, &attr, sizeof(attr));
+	printf("%s: err %i attr bpf fd %i flags %i\n", __func__, err, attr.bpf_fd, attr.file_flags);
+	return err;
 }
 
 int bpf_prog_attach(int prog_fd, int target_fd, enum bpf_attach_type type,
