@@ -257,8 +257,16 @@ static void bpf_map_free_deferred(struct work_struct *work)
 static void bpf_map_put_uref(struct bpf_map *map)
 {
 	if (atomic_dec_and_test(&map->usercnt)) {
-		if (map->map_type == BPF_MAP_TYPE_PROG_ARRAY)
+		switch (map->map_type) {
+		case BPF_MAP_TYPE_PROG_ARRAY:
 			bpf_fd_array_map_clear(map);
+			break;
+		case BPF_MAP_TYPE_SOCKMAP:
+			sock_map_release(map);
+			break;
+		default:
+			break;
+		}
 	}
 }
 
