@@ -647,6 +647,7 @@ static inline void bpf_map_offload_map_free(struct bpf_map *map)
 struct sock  *__sock_map_lookup_elem(struct bpf_map *map, u32 key);
 struct sock  *__sock_hash_lookup_elem(struct bpf_map *map, void *key);
 int sock_map_prog(struct bpf_map *map, struct bpf_prog *prog, u32 type);
+void sock_map_release(struct bpf_map *map);
 #else
 static inline struct sock  *__sock_map_lookup_elem(struct bpf_map *map, u32 key)
 {
@@ -665,6 +666,8 @@ static inline int sock_map_prog(struct bpf_map *map,
 {
 	return -EOPNOTSUPP;
 }
+
+void sock_map_release(struct bpf_map *map) {}
 #endif
 
 /* verifier prototypes for helper functions called from eBPF programs */
