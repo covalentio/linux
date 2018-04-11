@@ -667,7 +667,9 @@ static inline int sock_map_prog(struct bpf_map *map,
 	return -EOPNOTSUPP;
 }
 
-void sock_map_release(struct bpf_map *map) {}
+void sock_map_release(struct bpf_map *map)
+{
+}
 #endif
 
 /* verifier prototypes for helper functions called from eBPF programs */

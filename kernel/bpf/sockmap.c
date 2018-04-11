@@ -43,6 +43,7 @@
 #include <net/tcp.h>
 #include <linux/ptr_ring.h>
 #include <net/inet_common.h>
+#include <linux/sched/signal.h>
 
 #define SOCK_CREATE_FLAG_MASK \
 	(BPF_F_NUMA_NODE | BPF_F_RDONLY | BPF_F_WRONLY)
@@ -599,7 +600,6 @@ static int bpf_tcp_ingress(struct sock *sk, int apply_bytes,
 	} while (i != md->sg_end);
 
 	md->sg_start = i;
-
 	if (!err) {
 		list_add_tail(&r->list, &psock->ingress);
 		sk->sk_data_ready(sk);
@@ -773,6 +773,26 @@ out_err:
 	return err;
 }
 
+static int bpf_wait_data(struct sock *sk,
+			 struct smap_psock *psk, int flags,
+			 long timeo, int *err)
+{
+	int rc;
+
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
+
+	add_wait_queue(sk_sleep(sk), &wait);
+	sk_set_bit(SOCKWQ_ASYNC_WAITDATA, sk);
+	rc = sk_wait_event(sk, &timeo,
+			   !list_empty(&psk->ingress) ||
+			   !skb_queue_empty(&sk->sk_receive_queue),
+			   &wait);
+	sk_clear_bit(SOCKWQ_ASYNC_WAITDATA, sk);
+	remove_wait_queue(sk_sleep(sk), &wait);
+
+	return rc;
+}
+
 static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 			   int nonblock, int flags, int *addr_len)
 {
@@ -792,10 +812,8 @@ static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 		goto out;
 	rcu_read_unlock();
 
-	if (!skb_queue_empty(&sk->sk_receive_queue))
-		return tcp_recvmsg(sk, msg, len, nonblock, flags, addr_len);
-
 	lock_sock(sk);
+bytes_ready:
 	while (copied != len) {
 		struct scatterlist *sg;
 		struct sk_msg_buff *md;
@@ -850,9 +868,31 @@ static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 		}
 	}
 
+	if (!copied) {
+		long timeo;
+		int data;
+		int err = 0;
+	       
+		timeo = sock_rcvtimeo(sk, nonblock);
+		data = bpf_wait_data(sk, psock, flags, timeo, &err);
+
+		if (data) {
+			if (!skb_queue_empty(&sk->sk_receive_queue)) {
+				release_sock(sk);
+				smap_release_sock(psock, sk);
+				copied = tcp_recvmsg(sk, msg, len, nonblock, flags, addr_len);
+				return copied;
+			}
+			goto bytes_ready;
+		}
+
+		if (err)
+			copied = err;
+	}
+
 	release_sock(sk);
 	smap_release_sock(psock, sk);
-	return copied ? copied : tcp_recvmsg(sk, msg, len, nonblock, flags, addr_len);
+	return copied;
 out:
 	rcu_read_unlock();
 	return tcp_recvmsg(sk, msg, len, nonblock, flags, addr_len);
@@ -863,11 +903,23 @@ static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	int flags = msg->msg_flags | MSG_NO_SHARED_FRAGS;
 	struct sk_msg_buff md = {0};
+	struct sockcm_cookie sockc;
 	unsigned int sg_copy = 0;
 	struct smap_psock *psock;
 	int copied = 0, err = 0;
 	struct scatterlist *sg;
 	long timeo;
+
+
+	/* If this is a cmsg we do not have a policy handler for that yet */
+	sockc.tsflags = sk->sk_tsflags;
+	if (msg->msg_controllen) {
+		err = sock_cmsg_send(sk, msg, &sockc);
+		if (unlikely(err)) {
+			err = -EINVAL;
+			goto out_err;
+		}
+	}
 
 	/* Its possible a sock event or user removed the psock _but_ the ops
 	 * have not been reprogrammed yet so we get here. In this case fallback
@@ -1742,10 +1794,12 @@ static int __sock_map_ctx_update_elem(struct bpf_map *map,
 		new = true;
 	}
 
-	e = kzalloc(sizeof(*e), GFP_ATOMIC | __GFP_NOWARN);
-	if (!e) {
-		err = -ENOMEM;
-		goto out_progs;
+	if (map_link) {
+		e = kzalloc(sizeof(*e), GFP_ATOMIC | __GFP_NOWARN);
+		if (!e) {
+			err = -ENOMEM;
+			goto out_progs;
+		}
 	}
 
 	/* 3. At this point we have a reference to a valid psock that is
@@ -1776,14 +1830,10 @@ static int __sock_map_ctx_update_elem(struct bpf_map *map,
 		e->entry = map_link;
 		list_add_tail(&e->list, &psock->maps);
 	}
-	if (hash_link) {
-		e->hash_link = hash_link;
-		e->htab = container_of(map, struct bpf_htab, map);
-		list_add_tail(&e->list, &psock->maps);
-	}
 	write_unlock_bh(&sock->sk_callback_lock);
 	return err;
 out_free:
+	kfree(e);
 	smap_release_sock(psock, sock);
 out_progs:
 	if (verdict)
@@ -2153,6 +2203,7 @@ static int sock_hash_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 	struct bpf_htab *htab = container_of(map, struct bpf_htab, map);
 	struct bpf_sock_progs *progs = &htab->progs;
 	struct htab_elem *l_new = NULL, *l_old;
+	struct smap_psock_map_entry *e = NULL;
 	struct hlist_head *head;
 	struct smap_psock *psock;
 	u32 key_size, hash;
@@ -2168,6 +2219,10 @@ static int sock_hash_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 
 	if (unlikely(map_flags > BPF_EXIST))
 		return -EINVAL;
+
+	e = kzalloc(sizeof(*e), GFP_ATOMIC | __GFP_NOWARN);
+	if (!e)
+		return -ENOMEM;
 
 	WARN_ON_ONCE(!rcu_read_lock_held());
 	key_size = map->key_size;
@@ -2197,6 +2252,16 @@ static int sock_hash_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 		goto bucket_err;
 	}
 
+	psock = smap_psock_sk(sock);
+	if (unlikely(!psock)) {
+		err = -EINVAL;
+		goto bucket_err;
+	}
+
+	e->hash_link = l_new;
+	e->htab = container_of(map, struct bpf_htab, map);
+	list_add_tail(&e->list, &psock->maps);
+
 	/* add new element to the head of the list, so that
 	 * concurrent search will find it before old elem
 	 */
@@ -2214,6 +2279,7 @@ static int sock_hash_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 bucket_err:
 	raw_spin_unlock_bh(&b->lock);
 err:
+	kfree(e);
 	psock = smap_psock_sk(sock);
 	if (psock)
 		smap_release_sock(psock, sock);

@@ -1861,6 +1861,8 @@ BPF_CALL_4(bpf_sk_redirect_hash, struct sk_buff *, skb,
 
 	tcb->bpf.flags = flags;
 	tcb->bpf.sk_redir = __sock_hash_lookup_elem(map, key);
+	if (!tcb->bpf.sk_redir)
+		return SK_DROP;
 
 	return SK_PASS;
 }
@@ -1886,6 +1888,8 @@ BPF_CALL_4(bpf_sk_redirect_map, struct sk_buff *, skb,
 
 	tcb->bpf.flags = flags;
 	tcb->bpf.sk_redir = __sock_map_lookup_elem(map, key);
+	if (!tcb->bpf.sk_redir)
+		return SK_DROP;
 
 	return SK_PASS;
 }
@@ -1916,6 +1920,8 @@ BPF_CALL_4(bpf_msg_redirect_hash, struct sk_msg_buff *, msg,
 
 	msg->flags = flags;
 	msg->sk_redir = __sock_hash_lookup_elem(map, key);
+	if (!msg->sk_redir)
+		return SK_DROP;
 
 	return SK_PASS;
 }
@@ -1939,6 +1945,8 @@ BPF_CALL_4(bpf_msg_redirect_map, struct sk_msg_buff *, msg,
 
 	msg->flags = flags;
 	msg->sk_redir = __sock_map_lookup_elem(map, key);
+	if (!msg->sk_redir)
+		return SK_DROP;
 
 	return SK_PASS;
 }
