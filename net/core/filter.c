@@ -2124,6 +2124,30 @@ static const struct bpf_func_proto bpf_msg_pull_data_proto = {
 	.arg4_type	= ARG_ANYTHING,
 };
 
+static int __bpf_sock_get_uuid(struct sock *sk)
+{
+	kuid_t kuid;
+
+	if (!sk || !sk_fullsock(sk))
+		return overflowuid;
+	kuid = sock_net_uid(sock_net(sk), sk);
+	return from_kuid_munged(sock_net(sk)->user_ns, kuid);
+}
+
+BPF_CALL_1(bpf_msg_get_uuid, struct sk_msg_buff *, msg)
+{
+	struct sock *sk = sk_to_full_sk(msg->sk);
+
+	return __bpf_sock_get_uuid(sk);
+}
+
+static const struct bpf_func_proto bpf_msg_get_uuid_proto = {
+	.func           = bpf_msg_get_uuid,
+	.gpl_only       = false,
+	.ret_type       = RET_INTEGER,
+	.arg1_type      = ARG_PTR_TO_CTX,
+};
+
 BPF_CALL_1(bpf_get_cgroup_classid, const struct sk_buff *, skb)
 {
 	return task_get_classid(skb);
@@ -3440,12 +3464,8 @@ static const struct bpf_func_proto bpf_get_socket_cookie_proto = {
 BPF_CALL_1(bpf_get_socket_uid, struct sk_buff *, skb)
 {
 	struct sock *sk = sk_to_full_sk(skb->sk);
-	kuid_t kuid;
 
-	if (!sk || !sk_fullsock(sk))
-		return overflowuid;
-	kuid = sock_net_uid(sock_net(sk), sk);
-	return from_kuid_munged(sock_net(sk)->user_ns, kuid);
+	return __bpf_sock_get_uuid(sk);
 }
 
 static const struct bpf_func_proto bpf_get_socket_uid_proto = {
@@ -3692,6 +3712,20 @@ static const struct bpf_func_proto bpf_sock_ops_cb_flags_set_proto = {
 	.ret_type	= RET_INTEGER,
 	.arg1_type	= ARG_PTR_TO_CTX,
 	.arg2_type	= ARG_ANYTHING,
+};
+
+BPF_CALL_1(bpf_sock_get_uuid, struct bpf_sock_ops_kern *, bpf_sock)
+{
+	struct sock *sk = sk_to_full_sk(bpf_sock->sk);
+
+	return __bpf_sock_get_uuid(sk);
+}
+
+static const struct bpf_func_proto bpf_sock_get_uuid_proto = {
+	.func           = bpf_sock_get_uuid,
+	.gpl_only       = false,
+	.ret_type       = RET_INTEGER,
+	.arg1_type      = ARG_PTR_TO_CTX,
 };
 
 const struct ipv6_bpf_stub *ipv6_bpf_stub __read_mostly;
@@ -3950,6 +3984,8 @@ sock_ops_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_sock_map_update_proto;
 	case BPF_FUNC_sock_hash_update:
 		return &bpf_sock_hash_update_proto;
+	case BPF_FUNC_sock_get_uuid:
+		return &bpf_sock_get_uuid_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}
@@ -3969,6 +4005,8 @@ sk_msg_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_msg_cork_bytes_proto;
 	case BPF_FUNC_msg_pull_data:
 		return &bpf_msg_pull_data_proto;
+	case BPF_FUNC_msg_get_uuid:
+		return &bpf_msg_get_uuid_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}

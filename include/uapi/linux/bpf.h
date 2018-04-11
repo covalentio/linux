@@ -825,7 +825,9 @@ union bpf_attr {
 	FN(bind),			\
 	FN(sock_hash_update),		\
 	FN(msg_redirect_hash),		\
-	FN(sk_redirect_hash),
+	FN(sk_redirect_hash),		\
+	FN(sock_get_uuid),		\
+	FN(msg_get_uuid),
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
  * function eBPF program intends to call
