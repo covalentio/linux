@@ -1956,8 +1956,12 @@ static int sock_map_update_elem(struct bpf_map *map,
 		return -EINVAL;
 	}
 
+	/* ULPs are currently supported only for TCP sockets in ESTABLISHED
+	 * state.
+	 */
 	if (skops.sk->sk_type != SOCK_STREAM ||
-	    skops.sk->sk_protocol != IPPROTO_TCP) {
+	    skops.sk->sk_protocol != IPPROTO_TCP ||
+	    skops.sk->sk_state != TCP_ESTABLISHED) {
 		fput(socket->file);
 		return -EOPNOTSUPP;
 	}
@@ -2403,10 +2407,23 @@ const struct bpf_map_ops sock_hash_ops = {
 	.map_delete_elem = sock_hash_delete_elem,
 };
 
+static bool bpf_is_valid_sock(struct bpf_sock_ops_kern *ops)
+{
+	return ops->op == BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB ||
+	       ops->op == BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB;
+}
+
 BPF_CALL_4(bpf_sock_map_update, struct bpf_sock_ops_kern *, bpf_sock,
 	   struct bpf_map *, map, void *, key, u64, flags)
 {
 	WARN_ON_ONCE(!rcu_read_lock_held());
+
+	/* ULPs are currently supported only for TCP sockets in ESTABLISHED
+	 * state. This checks that the sock ops triggering the update is
+	 * one indicating we are (or will be soon) in an ESTABLISHED state.
+	 */
+	if (!bpf_is_valid_sock(bpf_sock))
+		return -EOPNOTSUPP;
 	return sock_map_ctx_update_elem(bpf_sock, map, key, flags);
 }
 
@@ -2425,6 +2442,9 @@ BPF_CALL_4(bpf_sock_hash_update, struct bpf_sock_ops_kern *, bpf_sock,
 	   struct bpf_map *, map, void *, key, u64, flags)
 {
 	WARN_ON_ONCE(!rcu_read_lock_held());
+
+	if (!bpf_is_valid_sock(bpf_sock))
+		return -EOPNOTSUPP;
 	return sock_hash_ctx_update_elem(bpf_sock, map, key, flags);
 }
 
