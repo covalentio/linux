@@ -130,6 +130,7 @@ struct smap_psock {
 	struct work_struct gc_work;
 
 	struct proto *sk_proto;
+	void (*save_unhash)(struct sock *sk);
 	void (*save_close)(struct sock *sk, long timeout);
 	void (*save_data_ready)(struct sock *sk);
 	void (*save_write_space)(struct sock *sk);
@@ -141,6 +142,7 @@ static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size);
 static int bpf_tcp_sendpage(struct sock *sk, struct page *page,
 			    int offset, size_t size, int flags);
+static void bpf_tcp_unhash(struct sock *sk);
 static void bpf_tcp_close(struct sock *sk, long timeout);
 
 static inline struct smap_psock *smap_psock_sk(const struct sock *sk)
@@ -182,14 +184,17 @@ static int bpf_tcp_init(struct sock *sk)
 		return -EBUSY;
 	}
 
+	psock->save_unhash = sk->sk_prot->unhash;
 	psock->save_close = sk->sk_prot->close;
 	psock->sk_proto = sk->sk_prot;
 
 	if (sk->sk_family == AF_INET6) {
 		tcpv6_bpf_proto = *sk->sk_prot;
+		tcpv6_bpf_proto.unhash = bpf_tcp_unhash;
 		tcpv6_bpf_proto.close = bpf_tcp_close;
 	} else {
 		tcp_bpf_proto = *sk->sk_prot;
+		tcp_bpf_proto.unhash = bpf_tcp_unhash;
 		tcp_bpf_proto.close = bpf_tcp_close;
 	}
 
@@ -245,27 +250,11 @@ static void free_htab_elem(struct bpf_htab *htab, struct htab_elem *l)
 	kfree_rcu(l, rcu);
 }
 
-static void bpf_tcp_close(struct sock *sk, long timeout)
+static void bpf_tcp_remove(struct sock *sk, struct smap_psock *psock)
 {
-	void (*close_fun)(struct sock *sk, long timeout);
 	struct smap_psock_map_entry *e, *tmp;
 	struct sk_msg_buff *md, *mtmp;
-	struct smap_psock *psock;
 	struct sock *osk;
-
-	rcu_read_lock();
-	psock = smap_psock_sk(sk);
-	if (unlikely(!psock)) {
-		rcu_read_unlock();
-		return sk->sk_prot->close(sk, timeout);
-	}
-
-	/* The psock may be destroyed anytime after exiting the RCU critial
-	 * section so by the time we use close_fun the psock may no longer
-	 * be valid. However, bpf_tcp_close is called with the sock lock
-	 * held so the close hook and sk are still valid.
-	 */
-	close_fun = psock->save_close;
 
 	write_lock_bh(&sk->sk_callback_lock);
 	if (psock->cork) {
@@ -294,6 +283,45 @@ static void bpf_tcp_close(struct sock *sk, long timeout)
 		}
 	}
 	write_unlock_bh(&sk->sk_callback_lock);
+}
+
+static void bpf_tcp_unhash(struct sock *sk)
+{
+	void (*unhash_fun)(struct sock *sk);
+	struct smap_psock *psock;
+
+	rcu_read_lock();
+	psock = smap_psock_sk(sk);
+	if (unlikely(!psock)) {
+		rcu_read_unlock();
+		return sk->sk_prot->unhash(sk);
+	}
+
+	/* The psock may be destroyed anytime after exiting the RCU critial
+	 * section so by the time we use close_fun the psock may no longer
+	 * be valid. However, bpf_tcp_close is called with the sock lock
+	 * held so the close hook and sk are still valid.
+	 */
+	unhash_fun = psock->save_unhash;
+	bpf_tcp_remove(sk, psock);
+	rcu_read_unlock();
+	unhash_fun(sk);
+}
+
+static void bpf_tcp_close(struct sock *sk, long timeout)
+{
+	void (*close_fun)(struct sock *sk, long timeout);
+	struct smap_psock *psock;
+
+	rcu_read_lock();
+	psock = smap_psock_sk(sk);
+	if (unlikely(!psock)) {
+		rcu_read_unlock();
+		return sk->sk_prot->close(sk, timeout);
+	}
+
+	close_fun = psock->save_close;
+	bpf_tcp_remove(sk, psock);
 	rcu_read_unlock();
 	close_fun(sk, timeout);
 }
