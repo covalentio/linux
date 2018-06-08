@@ -1976,13 +1976,17 @@ static int sock_map_update_elem(struct bpf_map *map,
 		return -EINVAL;
 	}
 
+	lock_sock(skops.sk);
 	if (skops.sk->sk_type != SOCK_STREAM ||
-	    skops.sk->sk_protocol != IPPROTO_TCP) {
-		fput(socket->file);
-		return -EOPNOTSUPP;
+	    skops.sk->sk_protocol != IPPROTO_TCP ||
+	    skops.sk->sk_state != TCP_ESTABLISHED) {
+		err = -EOPNOTSUPP;
+		goto out;
 	}
 
 	err = sock_map_ctx_update_elem(&skops, map, key, flags);
+out:
+	release_sock(skops.sk);
 	fput(socket->file);
 	return err;
 }
@@ -2247,10 +2251,6 @@ static int sock_hash_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 
 	sock = skops->sk;
 
-	if (sock->sk_type != SOCK_STREAM ||
-	    sock->sk_protocol != IPPROTO_TCP)
-		return -EOPNOTSUPP;
-
 	if (unlikely(map_flags > BPF_EXIST))
 		return -EINVAL;
 
@@ -2338,7 +2338,17 @@ static int sock_hash_update_elem(struct bpf_map *map,
 		return -EINVAL;
 	}
 
+	lock_sock(skops.sk);
+	if (skops.sk->sk_type != SOCK_STREAM ||
+	    skops.sk->sk_protocol != IPPROTO_TCP ||
+	    skops.sk->sk_state != TCP_ESTABLISHED) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
+
 	err = sock_hash_ctx_update_elem(&skops, map, key, flags);
+out:
+	release_sock(skops.sk);
 	fput(socket->file);
 	return err;
 }
@@ -2423,10 +2433,19 @@ const struct bpf_map_ops sock_hash_ops = {
 	.map_delete_elem = sock_hash_delete_elem,
 };
 
+static bool bpf_is_valid_sock(struct bpf_sock_ops_kern *ops)
+{
+	return ops->op == BPF_SOCK_OPS_PASSIVE_ESTABLISHED_CB ||
+	       ops->op == BPF_SOCK_OPS_ACTIVE_ESTABLISHED_CB;
+}
+
 BPF_CALL_4(bpf_sock_map_update, struct bpf_sock_ops_kern *, bpf_sock,
 	   struct bpf_map *, map, void *, key, u64, flags)
 {
 	WARN_ON_ONCE(!rcu_read_lock_held());
+
+	if (!bpf_is_valid_sock(bpf_sock))
+		return -EOPNOTSUPP;
 	return sock_map_ctx_update_elem(bpf_sock, map, key, flags);
 }
 
@@ -2445,6 +2464,9 @@ BPF_CALL_4(bpf_sock_hash_update, struct bpf_sock_ops_kern *, bpf_sock,
 	   struct bpf_map *, map, void *, key, u64, flags)
 {
 	WARN_ON_ONCE(!rcu_read_lock_held());
+
+	if (!bpf_is_valid_sock(bpf_sock))
+		return -EOPNOTSUPP;
 	return sock_hash_ctx_update_elem(bpf_sock, map, key, flags);
 }
 
