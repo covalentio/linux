@@ -239,16 +239,54 @@ out:
 	rcu_read_unlock();
 }
 
+static struct htab_elem *lookup_elem_raw(struct hlist_head *head,
+					 u32 hash, void *key, u32 key_size)
+{
+	struct htab_elem *l;
+
+	hlist_for_each_entry_rcu(l, head, hash_node) {
+		if (l->hash == hash && !memcmp(&l->key, key, key_size))
+			return l;
+	}
+
+	return NULL;
+}
+
+static inline struct bucket *__select_bucket(struct bpf_htab *htab, u32 hash)
+{
+	return &htab->buckets[hash & (htab->n_buckets - 1)];
+}
+
+static inline struct hlist_head *select_bucket(struct bpf_htab *htab, u32 hash)
+{
+	return &__select_bucket(htab, hash)->head;
+}
+
 static void free_htab_elem(struct bpf_htab *htab, struct htab_elem *l)
 {
 	atomic_dec(&htab->count);
 	kfree_rcu(l, rcu);
 }
 
+struct smap_psock_map_entry *psock_map_pop(struct sock *sk,
+					   struct smap_psock *psock)
+{
+	struct smap_psock_map_entry *e;
+
+	write_lock_bh(&sk->sk_callback_lock);
+	e = list_first_entry_or_null(&psock->maps,
+				     struct smap_psock_map_entry,
+				     list);
+	if (e)
+		list_del(&e->list);
+	write_unlock_bh(&sk->sk_callback_lock);
+	return e;
+}
+
 static void bpf_tcp_close(struct sock *sk, long timeout)
 {
 	void (*close_fun)(struct sock *sk, long timeout);
-	struct smap_psock_map_entry *e, *tmp;
+	struct smap_psock_map_entry *e;
 	struct sk_msg_buff *md, *mtmp;
 	struct smap_psock *psock;
 	struct sock *osk;
@@ -267,7 +305,6 @@ static void bpf_tcp_close(struct sock *sk, long timeout)
 	 */
 	close_fun = psock->save_close;
 
-	write_lock_bh(&sk->sk_callback_lock);
 	if (psock->cork) {
 		free_start_sg(psock->sock, psock->cork);
 		kfree(psock->cork);
@@ -280,20 +317,48 @@ static void bpf_tcp_close(struct sock *sk, long timeout)
 		kfree(md);
 	}
 
-	list_for_each_entry_safe(e, tmp, &psock->maps, list) {
+	/* Sock is in TCP_CLOSE state so any concurrent adds or updates will be
+	 * blocked by ESTABLISHED check. However, tcp_close() + delete + free
+	 * can all run at the same time. If a tcp_close + delete happens each
+	 * code path will remove the entry for the map/hash before deleting it.
+	 * In the map case a xchg and then check to verify we have a sk protects
+	 * two paths from tearing down the same object. For hash map we lock the
+	 * bucket and remove the object from the hash map before destroying to
+	 * ensure that only one reference exists. By pulling object off the head
+	 * of the list with (with sk_callback_lock) if multiple deleters are
+	 * running we avoid duplicate references.
+	 */
+	e = psock_map_pop(sk, psock);
+	while (e) {
 		if (e->entry) {
 			osk = cmpxchg(e->entry, sk, NULL);
 			if (osk == sk) {
-				list_del(&e->list);
 				smap_release_sock(psock, sk);
 			}
 		} else {
-			hlist_del_rcu(&e->hash_link->hash_node);
-			smap_release_sock(psock, e->hash_link->sk);
-			free_htab_elem(e->htab, e->hash_link);
+			struct htab_elem *link = e->hash_link;
+			struct hlist_head *head;
+			struct htab_elem *l;
+			struct bucket *b;
+
+			b = __select_bucket(e->htab, link->hash);
+			head = &b->head;
+			raw_spin_lock_bh(&b->lock);
+			l = lookup_elem_raw(head,
+					    link->hash, link->key,
+					    e->htab->elem_size);
+			/* If another thread deleted this object skip deletion.
+			 * The refcnt on psock may or may not be zero.
+			 */
+			if (l) {
+				hlist_del_rcu(&e->hash_link->hash_node);
+				smap_release_sock(psock, e->hash_link->sk);
+				free_htab_elem(e->htab, e->hash_link);
+			}
+			raw_spin_unlock_bh(&b->lock);
 		}
+		e = psock_map_pop(sk, psock);
 	}
-	write_unlock_bh(&sk->sk_callback_lock);
 	rcu_read_unlock();
 	close_fun(sk, timeout);
 }
@@ -2065,16 +2130,6 @@ free_htab:
 	return ERR_PTR(err);
 }
 
-static inline struct bucket *__select_bucket(struct bpf_htab *htab, u32 hash)
-{
-	return &htab->buckets[hash & (htab->n_buckets - 1)];
-}
-
-static inline struct hlist_head *select_bucket(struct bpf_htab *htab, u32 hash)
-{
-	return &__select_bucket(htab, hash)->head;
-}
-
 static void sock_hash_free(struct bpf_map *map)
 {
 	struct bpf_htab *htab = container_of(map, struct bpf_htab, map);
@@ -2091,10 +2146,13 @@ static void sock_hash_free(struct bpf_map *map)
 	 */
 	rcu_read_lock();
 	for (i = 0; i < htab->n_buckets; i++) {
-		struct hlist_head *head = select_bucket(htab, i);
+		struct bucket *b = __select_bucket(htab, i);
+		struct hlist_head *head;
 		struct hlist_node *n;
 		struct htab_elem *l;
 
+		raw_spin_lock_bh(&b->lock);
+		head = &b->head;
 		hlist_for_each_entry_safe(l, n, head, hash_node) {
 			struct sock *sock = l->sk;
 			struct smap_psock *psock;
@@ -2114,6 +2172,7 @@ static void sock_hash_free(struct bpf_map *map)
 			write_unlock_bh(&sock->sk_callback_lock);
 			kfree(l);
 		}
+		raw_spin_unlock_bh(&b->lock);
 	}
 	rcu_read_unlock();
 	bpf_map_area_free(htab->buckets);
@@ -2142,19 +2201,6 @@ static struct htab_elem *alloc_sock_hash_elem(struct bpf_htab *htab,
 	l_new->sk = sk;
 	l_new->hash = hash;
 	return l_new;
-}
-
-static struct htab_elem *lookup_elem_raw(struct hlist_head *head,
-					 u32 hash, void *key, u32 key_size)
-{
-	struct htab_elem *l;
-
-	hlist_for_each_entry_rcu(l, head, hash_node) {
-		if (l->hash == hash && !memcmp(&l->key, key, key_size))
-			return l;
-	}
-
-	return NULL;
 }
 
 static inline u32 htab_map_hash(const void *key, u32 key_len)
@@ -2288,8 +2334,10 @@ static int sock_hash_ctx_update_elem(struct bpf_sock_ops_kern *skops,
 		psock = smap_psock_sk(l_old->sk);
 
 		hlist_del_rcu(&l_old->hash_node);
+		write_lock_bh(&l_old->sk->sk_callback_lock);
 		smap_list_remove(psock, NULL, l_old);
 		smap_release_sock(psock, l_old->sk);
+		write_unlock_bh(&l_old->sk->sk_callback_lock);
 		free_htab_elem(htab, l_old);
 	}
 	raw_spin_unlock_bh(&b->lock);
