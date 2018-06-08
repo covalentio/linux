@@ -41,6 +41,7 @@
 #include <linux/mm.h>
 #include <net/strparser.h>
 #include <net/tcp.h>
+#include <net/transp_v6.h>
 #include <linux/ptr_ring.h>
 #include <net/inet_common.h>
 #include <linux/sched/signal.h>
@@ -140,6 +141,7 @@ static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size);
 static int bpf_tcp_sendpage(struct sock *sk, struct page *page,
 			    int offset, size_t size, int flags);
+static void bpf_tcp_close(struct sock *sk, long timeout);
 
 static inline struct smap_psock *smap_psock_sk(const struct sock *sk)
 {
@@ -162,6 +164,8 @@ out:
 }
 
 static struct proto tcp_bpf_proto;
+static struct proto tcpv6_bpf_proto;
+
 static int bpf_tcp_init(struct sock *sk)
 {
 	struct smap_psock *psock;
@@ -181,14 +185,30 @@ static int bpf_tcp_init(struct sock *sk)
 	psock->save_close = sk->sk_prot->close;
 	psock->sk_proto = sk->sk_prot;
 
+	if (sk->sk_family == AF_INET6) {
+		tcpv6_bpf_proto = *sk->sk_prot;
+		tcpv6_bpf_proto.close = bpf_tcp_close;
+	} else {
+		tcp_bpf_proto = *sk->sk_prot;
+		tcp_bpf_proto.close = bpf_tcp_close;
+	}
+
 	if (psock->bpf_tx_msg) {
+		tcpv6_bpf_proto.sendmsg = bpf_tcp_sendmsg;
+		tcpv6_bpf_proto.sendpage = bpf_tcp_sendpage;
+		tcpv6_bpf_proto.recvmsg = bpf_tcp_recvmsg;
+		tcpv6_bpf_proto.stream_memory_read = bpf_tcp_stream_read;
 		tcp_bpf_proto.sendmsg = bpf_tcp_sendmsg;
 		tcp_bpf_proto.sendpage = bpf_tcp_sendpage;
 		tcp_bpf_proto.recvmsg = bpf_tcp_recvmsg;
 		tcp_bpf_proto.stream_memory_read = bpf_tcp_stream_read;
 	}
 
-	sk->sk_prot = &tcp_bpf_proto;
+	if (sk->sk_family == AF_INET6)
+		sk->sk_prot = &tcpv6_bpf_proto;
+	else
+		sk->sk_prot = &tcp_bpf_proto;
+
 	rcu_read_unlock();
 	return 0;
 }
@@ -1111,8 +1131,6 @@ static void bpf_tcp_msg_add(struct smap_psock *psock,
 
 static int bpf_tcp_ulp_register(void)
 {
-	tcp_bpf_proto = tcp_prot;
-	tcp_bpf_proto.close = bpf_tcp_close;
 	/* Once BPF TX ULP is registered it is never unregistered. It
 	 * will be in the ULP list for the lifetime of the system. Doing
 	 * duplicate registers is not a problem.
