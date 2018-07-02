@@ -1358,12 +1358,16 @@ static int __test_suite(char *bpf_file)
 		return err;
 	}
 
+#if 0
 	if (setup_cgroup_environment()) {
 		fprintf(stderr, "ERROR: cgroup env failed\n");
 		return -EINVAL;
 	}
+#endif
 
-	cg_fd = create_and_get_cgroup(CG_PATH);
+//	cg_fd = create_and_get_cgroup(CG_PATH);
+	cg_fd = open("/mnt/cgroup2", O_DIRECTORY, O_RDONLY);
+#if 0
 	if (cg_fd < 0) {
 		fprintf(stderr,
 			"ERROR: (%i) open cg path failed: %s\n",
@@ -1375,6 +1379,7 @@ static int __test_suite(char *bpf_file)
 		fprintf(stderr, "ERROR: failed to join cgroup\n");
 		return -EINVAL;
 	}
+#endif
 
 	/* Tests basic commands and APIs with range of iov values */
 	txmsg_start = txmsg_end = 0;
@@ -1394,7 +1399,7 @@ static int __test_suite(char *bpf_file)
 
 out:
 	printf("Summary: %i PASSED %i FAILED\n", passed, failed);
-	cleanup_cgroup_environment();
+//	cleanup_cgroup_environment();
 	close(cg_fd);
 	return err;
 }
