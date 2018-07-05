@@ -91,9 +91,9 @@ out:
 }
 
 static void trim_sg(struct sock *sk, struct scatterlist *sg,
-		    int *sg_num_elem, unsigned int *sg_size, int target_size)
+		    int *sg_end, unsigned int *sg_size, int target_size)
 {
-	int i = *sg_num_elem - 1;
+	int i = *sg_end - 1;
 	int trim = *sg_size - target_size;
 
 	if (trim <= 0) {
@@ -116,7 +116,7 @@ static void trim_sg(struct sock *sk, struct scatterlist *sg,
 	sk_mem_uncharge(sk, trim);
 
 out:
-	*sg_num_elem = i + 1;
+	*sg_end = i + 1;
 }
 
 static void trim_both_sgl(struct sock *sk, int target_size)
@@ -125,7 +125,7 @@ static void trim_both_sgl(struct sock *sk, int target_size)
 	struct tls_sw_context_tx *ctx = tls_sw_ctx_tx(tls_ctx);
 
 	trim_sg(sk, ctx->sg_plaintext_data,
-		&ctx->sg_plaintext_num_elem,
+		&ctx->sg_plaintext_end,
 		&ctx->sg_plaintext_size,
 		target_size);
 
@@ -158,24 +158,48 @@ static int alloc_plaintext_sg(struct sock *sk, int len)
 	struct tls_sw_context_tx *ctx = tls_sw_ctx_tx(tls_ctx);
 	int rc = 0;
 
-	rc = sk_alloc_sg(sk, len, ctx->sg_plaintext_data, 0,
-			 &ctx->sg_plaintext_num_elem, &ctx->sg_plaintext_size,
-			 tls_ctx->pending_open_record_frags);
+	rc = sk_alloc_sg(sk, len, ctx->sg_plaintext_data,
+			 ctx->sg_plaintext_start, &ctx->sg_plaintext_end,
+			 &ctx->sg_plaintext_size,
+			 ctx->sg_plaintext_end - 1);
 
 	return rc;
 }
 
-static void free_sg(struct sock *sk, struct scatterlist *sg,
-		    int *sg_num_elem, unsigned int *sg_size)
+/* TBD: why does encrypt not have length zeroed? */
+static int free_encrypted_sg(struct sock *sk, int end, struct scatterlist *sg)
 {
-	int i, n = *sg_num_elem;
+	int i, free = 0;
 
-	for (i = 0; i < n; ++i) {
+	for (i = 0; i < end; ++i) {
+		free += sg[i].length;
 		sk_mem_uncharge(sk, sg[i].length);
 		put_page(sg_page(&sg[i]));
+		sg[i].length = 0;
+		sg[i].page_link = 0;
+		sg[i].offset = 0;
 	}
-	*sg_num_elem = 0;
-	*sg_size = 0;
+
+	return free;
+}
+
+static int free_plaintext_sg(struct sock *sk, int start, int end, struct scatterlist *sg)
+{
+	int i = start, free = 0;
+
+	while (sg[i].length) {
+		free += sg[i].length;
+		sk_mem_uncharge(sk, sg[i].length);
+		put_page(sg_page(&sg[i]));
+		sg[i].length = 0;
+		sg[i].page_link = 0;
+		sg[i].offset = 0;
+
+		i++;
+		if (i == MAX_SKB_FRAGS)
+			i = 0;
+	}
+	return free;
 }
 
 static void tls_free_both_sg(struct sock *sk)
@@ -183,11 +207,14 @@ static void tls_free_both_sg(struct sock *sk)
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
 	struct tls_sw_context_tx *ctx = tls_sw_ctx_tx(tls_ctx);
 
-	free_sg(sk, ctx->sg_encrypted_data, &ctx->sg_encrypted_num_elem,
-		&ctx->sg_encrypted_size);
+	free_encrypted_sg(sk, ctx->sg_encrypted_num_elem, ctx->sg_encrypted_data);
+	ctx->sg_encrypted_size = 0;
+	ctx->sg_encrypted_num_elem = 0;
 
-	free_sg(sk, ctx->sg_plaintext_data, &ctx->sg_plaintext_num_elem,
-		&ctx->sg_plaintext_size);
+	free_plaintext_sg(sk, ctx->sg_plaintext_start, ctx->sg_plaintext_end, ctx->sg_plaintext_data);
+	ctx->sg_plaintext_start = 0;
+	ctx->sg_plaintext_end = 0;
+	ctx->sg_plaintext_size = 0;
 }
 
 static int tls_do_encryption(struct tls_context *tls_ctx,
@@ -229,8 +256,9 @@ static int tls_push_record(struct sock *sk, int flags,
 	if (!req)
 		return -ENOMEM;
 
-	sg_mark_end(ctx->sg_plaintext_data + ctx->sg_plaintext_num_elem - 1);
+	sg_mark_end(ctx->sg_plaintext_data + ctx->sg_plaintext_end - 1);
 	sg_mark_end(ctx->sg_encrypted_data + ctx->sg_encrypted_num_elem - 1);
+	sg_chain(ctx->sg_aead_in, 2, &ctx->sg_plaintext_data[ctx->sg_plaintext_start]);
 
 	tls_make_aad(ctx->aad_space, ctx->sg_plaintext_size,
 		     tls_ctx->tx.rec_seq, tls_ctx->tx.rec_seq_size,
@@ -254,9 +282,12 @@ static int tls_push_record(struct sock *sk, int flags,
 		goto out_req;
 	}
 
-	free_sg(sk, ctx->sg_plaintext_data, &ctx->sg_plaintext_num_elem,
-		&ctx->sg_plaintext_size);
+	free_plaintext_sg(sk, ctx->sg_plaintext_start, ctx->sg_plaintext_end, ctx->sg_plaintext_data);
 
+	ctx->sg_plaintext_size = 0;
+	ctx->sg_plaintext_start = 0;
+	ctx->sg_plaintext_end = 0;
+	ctx->sg_plaintext_curr = 0;
 	ctx->sg_encrypted_num_elem = 0;
 	ctx->sg_encrypted_size = 0;
 
@@ -343,8 +374,9 @@ static int memcopy_from_iter(struct sock *sk, struct iov_iter *from,
 	struct scatterlist *sg = ctx->sg_plaintext_data;
 	int copy, i, rc = 0;
 
-	for (i = tls_ctx->pending_open_record_frags;
-	     i < ctx->sg_plaintext_num_elem; ++i) {
+	i = ctx->sg_plaintext_curr;
+
+	do {
 		copy = sg[i].length;
 		if (copy_from_iter(
 				page_address(sg_page(&sg[i])) + sg[i].offset,
@@ -354,13 +386,14 @@ static int memcopy_from_iter(struct sock *sk, struct iov_iter *from,
 		}
 		bytes -= copy;
 
-		++tls_ctx->pending_open_record_frags;
-
 		if (!bytes)
 			break;
-	}
 
+		if (++i == MAX_SKB_FRAGS)
+			i = 0;
+	} while (i != ctx->sg_plaintext_end);
 out:
+	ctx->sg_plaintext_curr = i;
 	return rc;
 }
 
@@ -428,7 +461,7 @@ alloc_encrypted:
 
 		if (full_record || eor) {
 			ret = zerocopy_from_iter(sk, &msg->msg_iter,
-				try_to_copy, &ctx->sg_plaintext_num_elem,
+				try_to_copy, &ctx->sg_plaintext_end,
 				&ctx->sg_plaintext_size,
 				ctx->sg_plaintext_data,
 				ARRAY_SIZE(ctx->sg_plaintext_data),
@@ -448,13 +481,14 @@ fallback_to_reg_send:
 			iov_iter_revert(&msg->msg_iter,
 					ctx->sg_plaintext_size - orig_size);
 			trim_sg(sk, ctx->sg_plaintext_data,
-				&ctx->sg_plaintext_num_elem,
+				&ctx->sg_plaintext_end,
 				&ctx->sg_plaintext_size,
 				orig_size);
 		}
 
 		required_size = ctx->sg_plaintext_size + try_to_copy;
 alloc_plaintext:
+		ctx->sg_plaintext_curr = ctx->sg_plaintext_end;
 		ret = alloc_plaintext_sg(sk, required_size);
 		if (ret) {
 			if (ret != -ENOSPC)
@@ -582,21 +616,22 @@ alloc_payload:
 		}
 
 		get_page(page);
-		sg = ctx->sg_plaintext_data + ctx->sg_plaintext_num_elem;
+		sg = ctx->sg_plaintext_data + ctx->sg_plaintext_end;
 		sg_set_page(sg, page, copy, offset);
 		sg_unmark_end(sg);
 
-		ctx->sg_plaintext_num_elem++;
+		ctx->sg_plaintext_end++;
+		if (ctx->sg_plaintext_end == MAX_SKB_FRAGS)
+			ctx->sg_plaintext_end = 0;
 
 		sk_mem_charge(sk, copy);
 		offset += copy;
 		size -= copy;
 		ctx->sg_plaintext_size += copy;
-		tls_ctx->pending_open_record_frags = ctx->sg_plaintext_num_elem;
+		tls_ctx->pending_open_record_frags = ctx->sg_plaintext_end;
 
 		if (full_record || eor ||
-		    ctx->sg_plaintext_num_elem ==
-		    ARRAY_SIZE(ctx->sg_plaintext_data)) {
+		    ctx->sg_plaintext_end == ctx->sg_plaintext_start) {
 push_record:
 			ret = tls_push_record(sk, flags, record_type);
 			if (ret) {
