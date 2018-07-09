@@ -89,7 +89,19 @@ int main(int argc, char **argv)
 		printf("ERROR: bpf_prog_attach: %d (%s)\n",
 		       error, strerror(errno));
 		return 5;
-	} else if (logFlag) {
+	}
+
+	if (prog_fd[1]) {
+		error = bpf_prog_attach(prog_fd[1], map_fd[0], BPF_SK_MSG_VERDICT, 0);
+		printf("attached prof_fd[1] %i\n", error);
+		if (error) {
+			printf("ERROR: bpf_prog_attach: %d (%s)\n",
+			       error, strerror(errno));
+			return 5;
+		}
+	}
+
+	if (logFlag) {
 		read_trace_pipe();
 	}
 
