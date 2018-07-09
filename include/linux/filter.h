@@ -20,7 +20,6 @@
 #include <linux/set_memory.h>
 #include <linux/kallsyms.h>
 #include <linux/if_vlan.h>
-#include <linux/scatterlist.h>
 
 #include <net/sch_generic.h>
 
@@ -520,50 +519,6 @@ struct bpf_skb_data_end {
 	void *data_end;
 };
 
-struct sk_msg_buff {
-	void *data;
-	void *data_end;
-	__u32 apply_bytes;
-	__u32 cork_bytes;
-	int sg_copybreak;
-	int sg_start;
-	int sg_curr;
-	int sg_end;
-	struct scatterlist sg_data[MAX_SKB_FRAGS];
-	bool sg_copy[MAX_SKB_FRAGS];
-	__u32 flags;
-	struct sock *sk_redir;
-	struct sock *sk;
-	struct sk_buff *skb;
-	struct list_head list;
-};
-
-enum __sk_action {
-	__SK_DROP = 0,
-	__SK_PASS,
-	__SK_REDIRECT,
-	__SK_NONE,
-};
-
-static inline void bpf_compute_data_pointers_sg(struct sk_msg_buff *md)
-{
-	struct scatterlist *sg = md->sg_data + md->sg_start;
-
-	if (md->sg_copy[md->sg_start]) {
-		md->data = md->data_end = 0;
-	} else {
-		md->data = sg_virt(sg);
-		md->data_end = md->data + sg->length;
-	}
-}
-
-static inline int bpf_map_msg_verdict(int _rc, struct sk_msg_buff *md)
-{
-	return ((_rc == SK_PASS) ?
-	       (md->sk_redir ? __SK_REDIRECT : __SK_PASS) :
-	       __SK_DROP);
-}
-
 /* Compute the linear packet data range [data, data_end) which
  * will be accessed by various program types (cls_bpf, act_bpf,
  * lwt, ...). Subsystems allowing direct data access must (!)
@@ -823,7 +778,6 @@ void xdp_do_flush_map(void);
 void bpf_warn_invalid_xdp_action(u32 act);
 
 struct sock *do_sk_redirect_map(struct sk_buff *skb);
-struct sock *do_msg_redirect_map(struct sk_msg_buff *md);
 
 #ifdef CONFIG_BPF_JIT
 extern int bpf_jit_enable;

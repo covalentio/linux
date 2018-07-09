@@ -68,6 +68,7 @@
 #include <linux/seg6_local.h>
 #include <net/seg6.h>
 #include <net/seg6_local.h>
+#include <linux/sk_msg.h>
 
 /**
  *	sk_filter_trim_cap - run a packet through a socket filter

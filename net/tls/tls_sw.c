@@ -40,6 +40,7 @@
 
 #include <net/strparser.h>
 #include <net/tls.h>
+#include <linux/sk_msg.h>
 
 #define MAX_IV_SIZE	TLS_CIPHER_AES_GCM_128_IV_SIZE
 
@@ -182,7 +183,7 @@ static int free_encrypted_sg(struct sock *sk, int end, struct scatterlist *sg)
 	return free;
 }
 
-static int free_plaintext_sg(struct sock *sk, int start, int end, struct scatterlist *sg)
+static int free_plaintext_sg(struct sock *sk, int start, struct scatterlist *sg)
 {
 	int i = start, free = 0;
 
@@ -201,6 +202,15 @@ static int free_plaintext_sg(struct sock *sk, int start, int end, struct scatter
 	return free;
 }
 
+static int free_start_sg(struct sock *sk, struct sk_msg_buff *md)
+{
+	int free = free_plaintext_sg(sk, md->sg_start, md->sg_data);
+
+	md->sg_start = md->sg_end;
+	return free;
+}
+
+
 static void tls_free_both_sg(struct sock *sk)
 {
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
@@ -211,7 +221,7 @@ static void tls_free_both_sg(struct sock *sk)
 	ctx->sg_encrypted_size = 0;
 	ctx->sg_encrypted_num_elem = 0;
 
-	free_plaintext_sg(sk, msg->sg_start, msg->sg_end, msg->sg_data);
+	free_plaintext_sg(sk, msg->sg_start, msg->sg_data);
 	msg->sg_start = msg->sg_end = 0;
 	ctx->sg_plaintext_size = 0;
 }
@@ -282,7 +292,7 @@ static int tls_push_record(struct sock *sk, int flags,
 		goto out_req;
 	}
 
-	free_plaintext_sg(sk, msg->sg_start, msg->sg_end, msg->sg_data);
+	free_plaintext_sg(sk, msg->sg_start, msg->sg_data);
 
 	ctx->sg_plaintext_size = 0;
 	msg->sg_start = 0;
@@ -394,6 +404,154 @@ static int memcopy_from_iter(struct sock *sk, struct iov_iter *from,
 out:
 	msg->sg_curr = i;
 	return rc;
+}
+
+static inline void apply_bytes_dec(struct sk_msg_buff *m, int i)
+{
+	if (m->apply_bytes) {
+		if (m->apply_bytes < i)
+			m->apply_bytes = 0;
+		else
+			m->apply_bytes -= i;
+	}
+}
+
+static void free_bytes_sg(struct sock *sk, int bytes,
+			  struct sk_msg_buff *md, bool charge)
+{
+	struct scatterlist *sg = md->sg_data;
+	int i = md->sg_start, free;
+
+	while (bytes && sg[i].length) {
+		free = sg[i].length;
+		if (bytes < free) {
+			sg[i].length -= bytes;
+			sg[i].offset += bytes;
+			if (charge)
+				sk_mem_uncharge(sk, bytes);
+			break;
+		}
+
+		if (charge)
+			sk_mem_uncharge(sk, sg[i].length);
+		put_page(sg_page(&sg[i]));
+		bytes -= sg[i].length;
+		sg[i].length = 0;
+		sg[i].page_link = 0;
+		sg[i].offset = 0;
+		i++;
+
+		if (i == MAX_SKB_FRAGS)
+			i = 0;
+	}
+	md->sg_start = i;
+}
+
+static inline void bpf_md_init(struct sk_msg_buff *m)
+{
+	if (!m->apply_bytes) {
+		m->eval =  __SK_NONE;
+#if 0
+		if (psock->sk_redir) {
+			sock_put(psock->sk_redir);
+			psock->sk_redir = NULL;
+		}
+#endif
+	}
+}
+
+static int bpf_exec_tx_verdict(struct sk_msg_buff *m,
+			       struct sock *sk,
+			       size_t *copied, int flags, int *sg_size)
+{
+	bool cork = false, enospc = (m->sg_start == m->sg_end);
+	struct smap_psock *psock;
+	struct sock *redir;
+	int err = 0;
+	int send;
+
+	psock = smap_psock_sk(sk);
+	if (!psock)
+		return 0;
+more_data:
+	if (m->eval == __SK_NONE)
+		m->eval = smap_do_tx_msg(sk, psock, m);
+
+	if (m->cork_bytes &&
+	    m->cork_bytes > *sg_size && !enospc) {
+		m->cork_bytes -= *sg_size;
+		goto out_err;
+	}
+
+	send = *sg_size;
+	if (m->apply_bytes && m->apply_bytes < send)
+		send = m->apply_bytes;
+
+	switch (m->eval) {
+	case __SK_PASS:
+		err = 0;//bpf_tcp_push(sk, send, m, flags, true);
+		if (unlikely(err)) {
+			*copied -= free_start_sg(sk, m);
+			break;
+		}
+
+		apply_bytes_dec(m, send);
+		*sg_size -= send;
+		break;
+#if 0
+	case __SK_REDIRECT:
+		redir = psock->sk_redir;
+		apply_bytes_dec(psock, send);
+
+		if (psock->cork) {
+			cork = true;
+			psock->cork = NULL;
+		}
+
+		return_mem_sg(sk, send, m);
+		release_sock(sk);
+
+		err = bpf_tcp_sendmsg_do_redirect(redir, send, m, flags);
+		lock_sock(sk);
+
+		if (unlikely(err < 0)) {
+			free_start_sg(sk, m);
+			*sg_size = 0;
+			if (!cork)
+				*copied -= send;
+		} else {
+			*sg_size -= send;
+		}
+
+		if (cork) {
+			free_start_sg(sk, m);
+			*sg_size = 0;
+			kfree(m);
+			m = NULL;
+			err = 0;
+		}
+		break;
+#endif
+	case __SK_DROP:
+	default:
+		free_bytes_sg(sk, send, m, true);
+		apply_bytes_dec(m, send);
+		*copied -= send;
+		*sg_size -= send;
+		err = -EACCES;
+		break;
+	}
+
+	if (likely(!err)) {
+		m->eval =  __SK_NONE; //bpf_md_init
+		if (m &&
+		    m->sg_data[m->sg_start].page_link &&
+		    m->sg_data[m->sg_start].length)
+			goto more_data;
+	}
+
+out_err:
+	return err;
 }
 
 int tls_sw_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
@@ -512,6 +670,7 @@ alloc_plaintext:
 			goto trim_sgl;
 
 		copied += try_to_copy;
+		ret = bpf_exec_tx_verdict(sgmsg, sk, &copied, msg->msg_flags, &ctx->sg_plaintext_size);
 		if (full_record || eor) {
 push_record:
 			ret = tls_push_record(sk, msg->msg_flags, record_type);

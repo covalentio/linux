@@ -44,6 +44,7 @@
 #include <linux/ptr_ring.h>
 #include <net/inet_common.h>
 #include <linux/sched/signal.h>
+#include <linux/sk_msg.h>
 
 #define SOCK_CREATE_FLAG_MASK \
 	(BPF_F_NUMA_NODE | BPF_F_RDONLY | BPF_F_WRONLY)
@@ -94,48 +95,6 @@ struct smap_psock_map_entry {
 	struct bpf_htab __rcu *htab;
 };
 
-struct smap_psock {
-	struct rcu_head	rcu;
-	refcount_t refcnt;
-
-	/* datapath variables */
-	struct sk_buff_head rxqueue;
-	bool strp_enabled;
-
-	/* datapath error path cache across tx work invocations */
-	int save_rem;
-	int save_off;
-	struct sk_buff *save_skb;
-
-	/* datapath variables for tx_msg ULP */
-	struct sock *sk_redir;
-	int apply_bytes;
-	int cork_bytes;
-	int sg_size;
-	int eval;
-	struct sk_msg_buff *cork;
-	struct list_head ingress;
-
-	struct strparser strp;
-	struct bpf_prog *bpf_tx_msg;
-	struct bpf_prog *bpf_parse;
-	struct bpf_prog *bpf_verdict;
-	struct list_head maps;
-	spinlock_t maps_lock;
-
-	/* Back reference used when sock callback trigger sockmap operations */
-	struct sock *sock;
-	unsigned long state;
-
-	struct work_struct tx_work;
-	struct work_struct gc_work;
-
-	struct proto *sk_proto;
-	void (*save_close)(struct sock *sk, long timeout);
-	void (*save_data_ready)(struct sock *sk);
-	void (*save_write_space)(struct sock *sk);
-};
-
 static void smap_release_sock(struct smap_psock *psock, struct sock *sock);
 static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 			   int nonblock, int flags, int *addr_len);
@@ -143,11 +102,6 @@ static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size);
 static int bpf_tcp_sendpage(struct sock *sk, struct page *page,
 			    int offset, size_t size, int flags);
 static void bpf_tcp_close(struct sock *sk, long timeout);
-
-static inline struct smap_psock *smap_psock_sk(const struct sock *sk)
-{
-	return rcu_dereference_sk_user_data(sk);
-}
 
 static bool bpf_tcp_stream_read(const struct sock *sk)
 {
@@ -575,9 +529,9 @@ static int free_curr_sg(struct sock *sk, struct sk_msg_buff *md)
 	return free_sg(sk, md->sg_curr, md);
 }
 
-static unsigned int smap_do_tx_msg(struct sock *sk,
-				   struct smap_psock *psock,
-				   struct sk_msg_buff *md)
+unsigned int smap_do_tx_msg(struct sock *sk,
+			    struct smap_psock *psock,
+			    struct sk_msg_buff *md)
 {
 	struct bpf_prog *prog;
 	unsigned int rc, _rc;
