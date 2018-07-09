@@ -374,13 +374,6 @@ static void bpf_tcp_close(struct sock *sk, long timeout)
 	close_fun(sk, timeout);
 }
 
-enum __sk_action {
-	__SK_DROP = 0,
-	__SK_PASS,
-	__SK_REDIRECT,
-	__SK_NONE,
-};
-
 static struct tcp_ulp_ops bpf_tcp_ulp_ops __read_mostly = {
 	.name		= "bpf_tcp",
 	.uid		= TCP_ULP_BPF,
@@ -499,18 +492,6 @@ retry:
 	return 0;
 }
 
-static inline void bpf_compute_data_pointers_sg(struct sk_msg_buff *md)
-{
-	struct scatterlist *sg = md->sg_data + md->sg_start;
-
-	if (md->sg_copy[md->sg_start]) {
-		md->data = md->data_end = 0;
-	} else {
-		md->data = sg_virt(sg);
-		md->data_end = md->data + sg->length;
-	}
-}
-
 static void return_mem_sg(struct sock *sk, int bytes, struct sk_msg_buff *md)
 {
 	struct scatterlist *sg = md->sg_data;
@@ -592,13 +573,6 @@ static int free_start_sg(struct sock *sk, struct sk_msg_buff *md)
 static int free_curr_sg(struct sock *sk, struct sk_msg_buff *md)
 {
 	return free_sg(sk, md->sg_curr, md);
-}
-
-static int bpf_map_msg_verdict(int _rc, struct sk_msg_buff *md)
-{
-	return ((_rc == SK_PASS) ?
-	       (md->sk_redir ? __SK_REDIRECT : __SK_PASS) :
-	       __SK_DROP);
 }
 
 static unsigned int smap_do_tx_msg(struct sock *sk,
