@@ -63,8 +63,10 @@ static int tls_do_decryption(struct sock *sk,
 		crypto_aead_reqsize(ctx->aead_recv);
 
 	aead_req = kzalloc(req_size, flags);
-	if (!aead_req)
+	if (!aead_req) {
+		printk("%s: enomem\n", __func__);
 		return -ENOMEM;
+	}
 
 	aead_request_set_tfm(aead_req, ctx->aead_recv);
 	aead_request_set_ad(aead_req, TLS_AAD_SPACE_SIZE);
@@ -76,8 +78,10 @@ static int tls_do_decryption(struct sock *sk,
 
 	ret = crypto_wait_req(crypto_aead_decrypt(aead_req), &ctx->async_wait);
 
-	if (ret < 0)
+	if (ret < 0) {
+		printk("%s: crypt_wait_req %i\n", __func__, ret);
 		goto out;
+	}
 
 	rxm->offset += tls_ctx->rx.prepend_size;
 	rxm->full_len -= tls_ctx->rx.overhead_size;
@@ -99,6 +103,7 @@ static void trim_sg(struct sock *sk, struct scatterlist *sg,
 	int trim = *sg_size - target_size;
 
 	if (trim <= 0) {
+		printk("%s: sg_size %i target_size %i\n", __func__, *sg_size, target_size);
 		WARN_ON(trim < 0);
 		return;
 	}
@@ -191,6 +196,7 @@ static int free_plaintext_sg(struct sock *sk, int start, struct scatterlist *sg)
 	while (sg[i].length) {
 		free += sg[i].length;
 		sk_mem_uncharge(sk, sg[i].length);
+		printk("%s: put page %i bytes @%i\n", __func__, free, i);
 		put_page(sg_page(&sg[i]));
 		sg[i].length = 0;
 		sg[i].page_link = 0;
@@ -201,6 +207,33 @@ static int free_plaintext_sg(struct sock *sk, int start, struct scatterlist *sg)
 			i = 0;
 	}
 	return free;
+}
+
+static void free_plaintext_bytes_sg(struct sock *sk, int bytes, struct sk_msg_buff *md)
+{
+	struct scatterlist *sg = md->sg_data;
+	int i = md->sg_start, free;
+
+	while (bytes && sg[i].length) {
+		free = sg[i].length;
+	//	if (charge)
+		if (bytes < free) {
+			sk_mem_uncharge(sk, bytes);
+			break;
+		}
+		sk_mem_uncharge(sk, free);//sg[i].length);
+		printk("%s: put page %i:%i bytes @%i\n", __func__, bytes, free, i);
+		put_page(sg_page(&sg[i]));
+		bytes -= sg[i].length;
+		sg[i].length = 0;
+		sg[i].page_link = 0;
+		sg[i].offset = 0;
+		i++;
+
+		if (i == MAX_SKB_FRAGS)
+			i = 0;
+	}
+	md->sg_start = i;
 }
 
 static int free_start_sg(struct sock *sk, struct sk_msg_buff *md)
@@ -269,7 +302,7 @@ static int tls_push_record(struct sock *sk, int flags, unsigned char record_type
 		return -ENOMEM;
 
        	_apply = apply = msg->apply_bytes;
-	if (apply && ctx->sg_plaintext_size != apply) {
+	if (apply) { // && ctx->sg_plaintext_size != apply) {
 		struct scatterlist *sg = msg->sg_data;
 		int i = msg->sg_start;
 
@@ -278,23 +311,41 @@ static int tls_push_record(struct sock *sk, int flags, unsigned char record_type
 			if (sg[i].length > apply) {
 				int len = sg[i].length - apply;
 				
+				get_page(sg_page(&sg[i])); // need extra reference
 				sg_set_page(&tmp, sg_page(&sg[i]), len, apply);
-				apply -= len;
+				apply = 0;
+				break; // we don't want to advance in this case
+#if 0
+			} else if (sg[i].length == apply) {
+
+				num_sg++;
+				apply -= sg[i].length;
 				break;
+#endif
 			} else {
 				num_sg++;
-				apply -= msg->sg_data[i].length;
+				apply -= sg[i].length;
 			}
 
 			i++;
-			if (i == MAX_SKB_FRAGS)
-				i = 0;
 			if (i == msg->sg_end)
 				break;
+			if (i == MAX_SKB_FRAGS)
+				i = 0;
 		}
 		printk("%s: end %i -> %i plaintext size %i -> %i\n", __func__, end, i, ctx->sg_plaintext_size, _apply - apply);
-		end = i;
-		ctx->sg_plaintext_size = _apply - apply;
+		end = i + 1; // wrap around if i == MAX_SKB_FRAGS?
+		if (end == MAX_SKB_FRAGS) {
+			printk("%s: end == max skb frags\n", __func__);
+			end = 0;
+		}
+		ctx->sg_plaintext_size = (_apply - apply);
+		trim_sg(sk, ctx->sg_encrypted_data,
+			&ctx->sg_encrypted_num_elem,
+			&ctx->sg_encrypted_size,
+			ctx->sg_plaintext_size +
+			tls_ctx->tx.overhead_size);
+		msg->apply_bytes = apply;
 	}
 
 	if (end < msg->sg_start) {
@@ -309,11 +360,12 @@ static int tls_push_record(struct sock *sk, int flags, unsigned char record_type
 
 	/* When data loops around ring we chain the remainder to the end. */
 	if (end < msg->sg_start) {
-		printk("%s: adding chain @%i with %lu\n", __func__, msg->sg_start, MAX_SKB_FRAGS - msg->sg_start);
+		printk("%s: adding chain @(%i,%i - %i) with %lu\n", __func__, msg->sg_start, msg->sg_end, end, MAX_SKB_FRAGS - msg->sg_start);
 		sg_chain(&msg->sg_data[msg->sg_start], MAX_SKB_FRAGS - msg->sg_start, &msg->sg_data[0]);
-		sg_mark_end(msg->sg_data + end - 1);
+		sg_mark_end(&msg->sg_data[msg->sg_start - 1]);
 	}
 
+	printk("%s: make aad plaintext size %i req_seq %p rec_seq_size %i record_type %u\n", __func__, ctx->sg_plaintext_size,  tls_ctx->tx.rec_seq, tls_ctx->tx.rec_seq_size, record_type);
 	tls_make_aad(ctx->aad_space, ctx->sg_plaintext_size,
 		     tls_ctx->tx.rec_seq, tls_ctx->tx.rec_seq_size,
 		     record_type);
@@ -323,6 +375,7 @@ static int tls_push_record(struct sock *sk, int flags, unsigned char record_type
 			 ctx->sg_encrypted_data[0].offset,
 			 ctx->sg_plaintext_size, record_type);
 
+	printk("%s: zero open record frags\n", __func__);
 	tls_ctx->pending_open_record_frags = 0;
 	set_bit(TLS_PENDING_CLOSED_RECORD, &tls_ctx->flags);
 
@@ -336,17 +389,27 @@ static int tls_push_record(struct sock *sk, int flags, unsigned char record_type
 		goto out_req;
 	}
 
-	free_plaintext_sg(sk, msg->sg_start, msg->sg_data);
 
-	if (msg->apply_bytes) {
+	if (num_sg || tmp.length) {
+		free_plaintext_bytes_sg(sk, ctx->sg_plaintext_size, msg); // only free sent bytes.
 		printk("%s: start %i end (%i,%i) num_sg %i\n", __func__, msg->sg_start, msg->sg_end, end,  num_sg);
 		msg->sg_start += num_sg;
 		if (msg->sg_start > MAX_SKB_FRAGS)
 			msg->sg_start = msg->sg_start - MAX_SKB_FRAGS;
-		if (tmp.length != 0)
+		if (tmp.length != 0) {
 			msg->sg_data[msg->sg_start] = tmp;
+		}
+
+		if (msg->sg_data[msg->sg_start].length == 0) {
+			printk("%s: apply reached end of sg : start %i end %i curr %i\n", __func__, msg->sg_start, msg->sg_end, msg->sg_curr);
+			ctx->sg_plaintext_size = 0;
+			msg->sg_start = 0;
+			msg->sg_end = 0;
+			msg->sg_curr = 0;
+		}
 	} else {
-		printk("%s: entire plaintext send\n", __func__);
+		free_plaintext_sg(sk, msg->sg_start, msg->sg_data); // only free sent bytes.
+		printk("%s: entire plaintext send start %i end %i curr %i\n", __func__, msg->sg_start, msg->sg_end, msg->sg_curr);
 		ctx->sg_plaintext_size = 0;
 		msg->sg_start = 0;
 		msg->sg_end = 0;
@@ -362,6 +425,7 @@ static int tls_push_record(struct sock *sk, int flags, unsigned char record_type
 		tls_err_abort(sk, EBADMSG);
 
 	tls_advance_record_sn(sk, &tls_ctx->tx);
+	printk("%s: done: start %i end (%i,%i) num_sg %i\n", __func__, msg->sg_start, msg->sg_end, end,  num_sg);
 out_req:
 	kfree(req);
 	return rc;
@@ -519,7 +583,6 @@ static int bpf_exec_tx_verdict(struct sk_msg_buff *m,
 {
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
 	struct tls_sw_context_tx *ctx = tls_sw_ctx_tx(tls_ctx);
-
 	bool cork = false, enospc = (m->sg_start == m->sg_end);
 	unsigned char record_type = TLS_RECORD_TYPE_DATA;
 	struct smap_psock *psock; /* only used for prog ref, maybe cache prog in sk_msg_buff? */
@@ -540,6 +603,7 @@ static int bpf_exec_tx_verdict(struct sk_msg_buff *m,
 	}
 	rcu_read_unlock();
 more_data:
+	printk("%s: data: __sk_pass start %i end (%i)\n", __func__, m->sg_start, m->sg_end);
 	if (m->eval == __SK_NONE)
 		m->eval = smap_do_tx_msg(sk, psock, m);
 
@@ -555,10 +619,12 @@ more_data:
 
 	switch (m->eval) {
 	case __SK_PASS:
+		printk("%s: st: __sk_pass start %i end (%i)\n", __func__, m->sg_start, m->sg_end);
 		err = tls_push_record(sk, flags, record_type);
 		if (unlikely(err))
 			break;
-		apply_bytes_dec(m, send);
+		printk("%s: end: __sk_pass start %i end (%i)\n", __func__, m->sg_start, m->sg_end);
+		//apply_bytes_dec(m, send);
 		break;
 #if 0
 	case __SK_REDIRECT:
@@ -608,8 +674,15 @@ more_data:
 		bpf_md_init(psock, m);
 		if (m &&
 		    m->sg_data[m->sg_start].page_link &&
-		    m->sg_data[m->sg_start].length)
-			goto more_data;
+		    m->sg_data[m->sg_start].length) {
+			printk("%s: more data sg_size %i\n", __func__, sg_size);
+			err = alloc_encrypted_sg(sk, sg_size + tls_ctx->tx.overhead_size); // optimize sg_size otherwise we will always trim
+			if (!err)
+				goto more_data;
+			else
+				printk("%s: alloc encrypted failed dropping iterator\n", __func__);
+
+		}
 	}
 
 out_err:
@@ -667,6 +740,7 @@ int tls_sw_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 		if (!sk_stream_memory_free(sk))
 			goto wait_for_sndbuf;
 alloc_encrypted:
+		printk("%s: alloc encrypted size %i\n", __func__, required_size);
 		ret = alloc_encrypted_sg(sk, required_size);
 		if (ret) {
 			if (ret != -ENOSPC)
@@ -686,36 +760,54 @@ alloc_encrypted:
 			ret = zerocopy_from_iter(sk, &msg->msg_iter,
 				try_to_copy, &sgmsg->sg_end,
 				&ctx->sg_plaintext_size, sgmsg->sg_data,
-				ARRAY_SIZE(sgmsg->sg_data),
+				MAX_SKB_FRAGS,//ARRAY_SIZE(sgmsg->sg_data),
 				true);
 			if (ret)
 				goto fallback_to_reg_send;
 
 			copied += try_to_copy;
+			printk("%s: first %i end %i\n", __func__, first, sgmsg->sg_end);
 			/* Account for zerocopy if pull data is being used */
 			/* TBD: maybe we can be clever and avoid another list walk, but its only frags elems so... */
-			for (i = first; i < sgmsg->sg_end;) {
+			i = first;
+			do {
 				sgmsg->sg_copy[i] = true;
 				i++;
+				if (i == sgmsg->sg_end)
+					break;
 				if (i == MAX_SKB_FRAGS)
 					i = 0;
-			}
+			} while (1);
+
 			ret = bpf_exec_tx_verdict(sgmsg, sk, &copied, msg->msg_flags, ctx->sg_plaintext_size);
 			if (!ret)
 				continue;
-			if (ret == -EAGAIN || ret ==  -EACCES)
+			else if (ret == -EAGAIN || ret == -EACCES)
 				goto send_end;
+			else if (ret != -ENOSPC)
+				goto wait_for_memory;
 
 			copied -= try_to_copy;
-			for (i = first; i < sgmsg->sg_end;) {
+			do {
 				sgmsg->sg_copy[i] = false;
+				i++;
+				if (i == sgmsg->sg_end)
+					break;
+				if (i == MAX_SKB_FRAGS)
+					i = 0;
+			} while (1);
+fallback_to_reg_send:
+			printk("%s: fallback to reg send (%i,%i)\n", __func__, sgmsg->sg_start, sgmsg->sg_end);
+			iov_iter_revert(&msg->msg_iter,
+					ctx->sg_plaintext_size - orig_size);
+			i = first;
+			while (sgmsg->sg_data[i].length) {
+				sk_mem_uncharge(sk, sgmsg->sg_data[i].length);
+				sgmsg->sg_data[i].length = 0;
 				i++;
 				if (i == MAX_SKB_FRAGS)
 					i = 0;
 			}
-fallback_to_reg_send:
-			iov_iter_revert(&msg->msg_iter,
-					ctx->sg_plaintext_size - orig_size);
 			trim_sg(sk,
 				sgmsg->sg_data, &sgmsg->sg_end,
 				&ctx->sg_plaintext_size,
@@ -725,7 +817,9 @@ fallback_to_reg_send:
 		required_size = ctx->sg_plaintext_size + try_to_copy;
 alloc_plaintext:
 		sgmsg->sg_curr = sgmsg->sg_end;
+		printk("%s: alloc plaintext_sg\n", __func__);
 		ret = alloc_plaintext_sg(sk, required_size);
+		printk("%s: alloc plaintext_sg: %i\n", __func__, ret);
 		if (ret) {
 			if (ret != -ENOSPC)
 				goto wait_for_memory;
@@ -744,7 +838,9 @@ alloc_plaintext:
 				tls_ctx->tx.overhead_size);
 		}
 
+		printk("%s: copy\n", __func__);
 		ret = memcopy_from_iter(sk, &msg->msg_iter, try_to_copy);
+		printk("%s: copy %i\n", __func__, ret);
 		if (ret)
 			goto trim_sgl;
 
@@ -759,11 +855,13 @@ push_record:
 			}
 		}
 
+		printk("%s: continue\n", __func__);
 		continue;
 
 wait_for_sndbuf:
 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 wait_for_memory:
+		printk("%s: wait for memory\n", __func__);
 		ret = sk_stream_wait_memory(sk, &timeo);
 		if (ret) {
 trim_sgl:
@@ -774,6 +872,8 @@ trim_sgl:
 		if (tls_is_pending_closed_record(tls_ctx))
 			goto push_record;
 
+		// hmm can this loop with sock lock? if we don't have memory and can't get it shouldn't we just abort?
+		printk("%s: encrypted size %i required size %i\n", __func__, ctx->sg_encrypted_size, required_size);	
 		if (ctx->sg_encrypted_size < required_size)
 			goto alloc_encrypted;
 
@@ -913,13 +1013,17 @@ static struct sk_buff *tls_wait_data(struct sock *sk, int flags,
 	while (!(skb = ctx->recv_pkt)) {
 		if (sk->sk_err) {
 			*err = sock_error(sk);
+			printk("%s: sk err\n", __func__);
 			return NULL;
 		}
 
-		if (sock_flag(sk, SOCK_DONE))
+		if (sock_flag(sk, SOCK_DONE)) {
+			printk("%s: sk done\n", __func__);
 			return NULL;
+		}
 
 		if ((flags & MSG_DONTWAIT) || !timeo) {
+			printk("%s: sk dontwait\n", __func__);
 			*err = -EAGAIN;
 			return NULL;
 		}
@@ -932,6 +1036,7 @@ static struct sk_buff *tls_wait_data(struct sock *sk, int flags,
 
 		/* Handle signals */
 		if (signal_pending(current)) {
+			printk("%s: sk signal pending\n", __func__);
 			*err = sock_intr_errno(timeo);
 			return NULL;
 		}
@@ -955,8 +1060,10 @@ static int decrypt_skb(struct sock *sk, struct sk_buff *skb,
 	ret = skb_copy_bits(skb, rxm->offset + TLS_HEADER_SIZE,
 			    iv + TLS_CIPHER_AES_GCM_128_SALT_SIZE,
 			    tls_ctx->rx.iv_size);
-	if (ret < 0)
+	if (ret < 0) {
+		printk("%s: copy bits err\n", __func__);
 		return ret;
+	}
 
 	memcpy(iv, tls_ctx->rx.iv, TLS_CIPHER_AES_GCM_128_SALT_SIZE);
 	if (!sgout) {
@@ -1029,8 +1136,10 @@ int tls_sw_recvmsg(struct sock *sk,
 
 	flags |= nonblock;
 
-	if (unlikely(flags & MSG_ERRQUEUE))
+	if (unlikely(flags & MSG_ERRQUEUE)) {
+		printk("%s: errqueue flag\n", __func__);
 		return sock_recv_errqueue(sk, msg, len, SOL_IP, IP_RECVERR);
+	}
 
 	lock_sock(sk);
 
@@ -1083,14 +1192,16 @@ int tls_sw_recvmsg(struct sock *sk,
 							 to_copy, &pages,
 							 &chunk, &sgin[1],
 							 MAX_SKB_FRAGS,	false);
-				if (err < 0)
+				if (err < 0) {
 					goto fallback_to_reg_recv;
+				}
 
 				err = decrypt_skb(sk, skb, sgin);
 				for (; pages > 0; pages--)
 					put_page(sg_page(&sgin[pages]));
 				if (err < 0) {
 					tls_err_abort(sk, EBADMSG);
+					printk("%s: ebadmsg\n", __func__);
 					goto recv_end;
 				}
 			} else {
@@ -1108,8 +1219,10 @@ fallback_to_reg_recv:
 			chunk = min_t(unsigned int, rxm->full_len, len);
 			err = skb_copy_datagram_msg(skb, rxm->offset, msg,
 						    chunk);
-			if (err < 0)
+			if (err < 0) {
+				printk("%s: datagram msg error err %i\n", __func__, err);
 				goto recv_end;
+			}
 		}
 
 		copied += chunk;
@@ -1128,8 +1241,9 @@ fallback_to_reg_recv:
 			}
 		}
 		/* If we have a new message from strparser, continue now. */
-		if (copied >= target && !ctx->recv_pkt)
+		if (copied >= target && !ctx->recv_pkt) {
 			break;
+		}
 	} while (len);
 
 recv_end:
