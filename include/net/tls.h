@@ -90,10 +90,7 @@ struct tls_sw_context_tx {
 	char aad_space[TLS_AAD_SPACE_SIZE];
 
 	unsigned int sg_plaintext_size;
-	int sg_plaintext_start;
-	int sg_plaintext_curr;
-	int sg_plaintext_end;
-	struct scatterlist sg_plaintext_data[MAX_SKB_FRAGS];
+	struct sk_msg_buff *sg_plaintext_msg;
 
 	unsigned int sg_encrypted_size;
 	int sg_encrypted_num_elem;
