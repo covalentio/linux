@@ -138,8 +138,10 @@ int tcp_set_ulp(struct sock *sk, const char *name)
 	const struct tcp_ulp_ops *ulp_ops;
 	int err = 0;
 
+#if 0
 	if (icsk->icsk_ulp_ops)
 		return -EEXIST;
+#endif
 
 	ulp_ops = __tcp_ulp_find_autoload(name);
 	if (!ulp_ops)
@@ -166,8 +168,10 @@ int tcp_set_ulp_id(struct sock *sk, int ulp)
 	const struct tcp_ulp_ops *ulp_ops;
 	int err;
 
+#if 0
 	if (icsk->icsk_ulp_ops)
 		return -EEXIST;
+#endif
 
 	ulp_ops = __tcp_ulp_lookup(ulp);
 	if (!ulp_ops)
