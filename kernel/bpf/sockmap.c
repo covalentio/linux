@@ -95,7 +95,6 @@ struct smap_psock_map_entry {
 	struct bpf_htab __rcu *htab;
 };
 
-static void smap_release_sock(struct smap_psock *psock, struct sock *sock);
 static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 			   int nonblock, int flags, int *addr_len);
 static int bpf_tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size);
@@ -188,7 +187,6 @@ static int bpf_tcp_init(struct sock *sk)
 	return 0;
 }
 
-static void smap_release_sock(struct smap_psock *psock, struct sock *sock);
 static int free_start_sg(struct sock *sk, struct sk_msg_buff *md);
 
 static void bpf_tcp_release(struct sock *sk)
@@ -1376,7 +1374,7 @@ static void smap_destroy_psock(struct rcu_head *rcu)
 	schedule_work(&psock->gc_work);
 }
 
-static void smap_release_sock(struct smap_psock *psock, struct sock *sock)
+void smap_release_sock(struct smap_psock *psock, struct sock *sock)
 {
 	if (refcount_dec_and_test(&psock->refcnt)) {
 		tcp_cleanup_ulp(sock);

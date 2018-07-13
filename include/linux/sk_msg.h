@@ -36,7 +36,14 @@ struct sk_msg_buff {
 	int sg_start;
 	int sg_curr;
 	int sg_end;
-	struct scatterlist sg_data[MAX_SKB_FRAGS];
+	/* We have +1 scatterlist element here to account for the
+	 * possibility we may need to chain a sg if we have new
+	 * data to insert or the ring loops around in the 'apply'
+	 * action case. kTLS expect sg list for encryption so to
+	 * allow sending the entire msg in one crypto API call we
+	 * may use this.
+	 */
+	struct scatterlist sg_data[MAX_SKB_FRAGS + 1];
 	bool sg_copy[MAX_SKB_FRAGS];
 	__u32 flags;
 	struct sock *sk_redir;
@@ -119,8 +126,5 @@ static inline struct smap_psock *smap_psock_sk(const struct sock *sk)
 }
 
 struct sock *do_msg_redirect_map(struct sk_msg_buff *md);
-unsigned int smap_do_tx_msg(struct sock *sk,
-			    struct smap_psock *psock,
-			    struct sk_msg_buff *md);
-
+void smap_release_sock(struct smap_psock *psock, struct sock *sock);
 #endif

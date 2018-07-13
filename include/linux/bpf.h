@@ -692,12 +692,18 @@ static inline void bpf_map_offload_map_free(struct bpf_map *map)
 }
 #endif /* CONFIG_NET && CONFIG_BPF_SYSCALL */
 
+struct smap_psock;
+struct sk_msg_buff;
+
 #if defined(CONFIG_STREAM_PARSER) && defined(CONFIG_BPF_SYSCALL) && defined(CONFIG_INET)
 struct sock  *__sock_map_lookup_elem(struct bpf_map *map, u32 key);
 struct sock  *__sock_hash_lookup_elem(struct bpf_map *map, void *key);
 int sock_map_prog(struct bpf_map *map, struct bpf_prog *prog, u32 type);
 int sockmap_get_from_fd(const union bpf_attr *attr, int type,
 			struct bpf_prog *prog);
+unsigned int smap_do_tx_msg(struct sock *sk,
+			    struct smap_psock *psock,
+			    struct sk_msg_buff *md);
 #else
 static inline struct sock  *__sock_map_lookup_elem(struct bpf_map *map, u32 key)
 {
@@ -722,6 +728,10 @@ static inline int sockmap_get_from_fd(const union bpf_attr *attr, int type,
 {
 	return -EINVAL;
 }
+
+unsigned int smap_do_tx_msg(struct sock *sk,
+			    struct smap_psock *psock,
+			    struct sk_msg_buff *md);
 #endif
 
 #if defined(CONFIG_XDP_SOCKETS)

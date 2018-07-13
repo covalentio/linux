@@ -41,6 +41,7 @@
 #include <net/strparser.h>
 #include <net/tls.h>
 #include <linux/sk_msg.h>
+#include <linux/bpf.h>
 
 #define MAX_IV_SIZE	TLS_CIPHER_AES_GCM_128_IV_SIZE
 
@@ -252,23 +253,66 @@ static int tls_do_encryption(struct tls_context *tls_ctx,
 	return rc;
 }
 
-static int tls_push_record(struct sock *sk, int flags,
-			   unsigned char record_type)
+static int tls_push_record(struct sock *sk, int flags, unsigned char record_type)
 {
 	struct tls_context *tls_ctx = tls_get_ctx(sk);
 	struct tls_sw_context_tx *ctx = tls_sw_ctx_tx(tls_ctx);
 	struct sk_msg_buff *msg = ctx->sg_plaintext_msg;
+	int _apply, apply;
+	struct scatterlist tmp = {0};
 	struct aead_request *req;
-	int rc;
+	int rc, end = msg->sg_end, num_sg = 0;
 
 	req = kzalloc(sizeof(struct aead_request) +
 		      crypto_aead_reqsize(ctx->aead_send), sk->sk_allocation);
 	if (!req)
 		return -ENOMEM;
 
-	sg_mark_end(msg->sg_data + msg->sg_end - 1);
+       	_apply = apply = msg->apply_bytes;
+	if (apply && ctx->sg_plaintext_size != apply) {
+		struct scatterlist *sg = msg->sg_data;
+		int i = msg->sg_start;
+
+		while (apply && sg[i].length) {
+			printk("%s: index %i length %i\n", __func__, i, sg[i].length);
+			if (sg[i].length > apply) {
+				int len = sg[i].length - apply;
+				
+				sg_set_page(&tmp, sg_page(&sg[i]), len, apply);
+				apply -= len;
+				break;
+			} else {
+				num_sg++;
+				apply -= msg->sg_data[i].length;
+			}
+
+			i++;
+			if (i == MAX_SKB_FRAGS)
+				i = 0;
+			if (i == msg->sg_end)
+				break;
+		}
+		printk("%s: end %i -> %i plaintext size %i -> %i\n", __func__, end, i, ctx->sg_plaintext_size, _apply - apply);
+		end = i;
+		ctx->sg_plaintext_size = _apply - apply;
+	}
+
+	if (end < msg->sg_start) {
+		printk("%s: end <= start (%i < %i)\n", __func__, end, msg->sg_start);
+		sg_mark_end(msg->sg_data + MAX_SKB_FRAGS - 1);
+	} else {
+		sg_mark_end(msg->sg_data + end - 1);
+	}
+
 	sg_mark_end(ctx->sg_encrypted_data + ctx->sg_encrypted_num_elem - 1);
 	sg_chain(ctx->sg_aead_in, 2, &msg->sg_data[msg->sg_start]);
+
+	/* When data loops around ring we chain the remainder to the end. */
+	if (end < msg->sg_start) {
+		printk("%s: adding chain @%i with %lu\n", __func__, msg->sg_start, MAX_SKB_FRAGS - msg->sg_start);
+		sg_chain(&msg->sg_data[msg->sg_start], MAX_SKB_FRAGS - msg->sg_start, &msg->sg_data[0]);
+		sg_mark_end(msg->sg_data + end - 1);
+	}
 
 	tls_make_aad(ctx->aad_space, ctx->sg_plaintext_size,
 		     tls_ctx->tx.rec_seq, tls_ctx->tx.rec_seq_size,
@@ -294,10 +338,21 @@ static int tls_push_record(struct sock *sk, int flags,
 
 	free_plaintext_sg(sk, msg->sg_start, msg->sg_data);
 
-	ctx->sg_plaintext_size = 0;
-	msg->sg_start = 0;
-	msg->sg_end = 0;
-	msg->sg_curr = 0;
+	if (msg->apply_bytes) {
+		printk("%s: start %i end (%i,%i) num_sg %i\n", __func__, msg->sg_start, msg->sg_end, end,  num_sg);
+		msg->sg_start += num_sg;
+		if (msg->sg_start > MAX_SKB_FRAGS)
+			msg->sg_start = msg->sg_start - MAX_SKB_FRAGS;
+		if (tmp.length != 0)
+			msg->sg_data[msg->sg_start] = tmp;
+	} else {
+		printk("%s: entire plaintext send\n", __func__);
+		ctx->sg_plaintext_size = 0;
+		msg->sg_start = 0;
+		msg->sg_end = 0;
+		msg->sg_curr = 0;
+	}
+
 	ctx->sg_encrypted_num_elem = 0;
 	ctx->sg_encrypted_size = 0;
 
@@ -447,56 +502,63 @@ static void free_bytes_sg(struct sock *sk, int bytes,
 	md->sg_start = i;
 }
 
-static inline void bpf_md_init(struct sk_msg_buff *m)
+static inline void bpf_md_init(struct smap_psock *psock, struct sk_msg_buff *m)
 {
 	if (!m->apply_bytes) {
 		m->eval =  __SK_NONE;
-#if 0
 		if (psock->sk_redir) {
 			sock_put(psock->sk_redir);
 			psock->sk_redir = NULL;
 		}
-#endif
 	}
 }
 
 static int bpf_exec_tx_verdict(struct sk_msg_buff *m,
 			       struct sock *sk,
-			       size_t *copied, int flags, int *sg_size)
+			       size_t *copied, int flags, int sg_size)
 {
+	struct tls_context *tls_ctx = tls_get_ctx(sk);
+	struct tls_sw_context_tx *ctx = tls_sw_ctx_tx(tls_ctx);
+
 	bool cork = false, enospc = (m->sg_start == m->sg_end);
-	struct smap_psock *psock;
+	unsigned char record_type = TLS_RECORD_TYPE_DATA;
+	struct smap_psock *psock; /* only used for prog ref, maybe cache prog in sk_msg_buff? */
 	struct sock *redir;
 	int err = 0;
 	int send;
 
+	rcu_read_lock();
 	psock = smap_psock_sk(sk);
-	if (!psock)
-		return 0;
+	if (!psock) {
+		rcu_read_unlock();
+		return tls_push_record(sk, flags, record_type);
+	}
+
+	if (!refcount_inc_not_zero(&psock->refcnt)) {
+		rcu_read_unlock();
+		return tls_push_record(sk, flags, record_type);
+	}
+	rcu_read_unlock();
 more_data:
 	if (m->eval == __SK_NONE)
 		m->eval = smap_do_tx_msg(sk, psock, m);
 
 	if (m->cork_bytes &&
-	    m->cork_bytes > *sg_size && !enospc) {
-		m->cork_bytes -= *sg_size;
+	    m->cork_bytes > sg_size && !enospc) {
+		m->cork_bytes -= sg_size;
 		goto out_err;
 	}
 
-	send = *sg_size;
+	send = sg_size;
 	if (m->apply_bytes && m->apply_bytes < send)
 		send = m->apply_bytes;
 
 	switch (m->eval) {
 	case __SK_PASS:
-		err = 0;//bpf_tcp_push(sk, send, m, flags, true);
-		if (unlikely(err)) {
-			*copied -= free_start_sg(sk, m);
+		err = tls_push_record(sk, flags, record_type);
+		if (unlikely(err))
 			break;
-		}
-
 		apply_bytes_dec(m, send);
-		*sg_size -= send;
 		break;
 #if 0
 	case __SK_REDIRECT:
@@ -537,13 +599,13 @@ more_data:
 		free_bytes_sg(sk, send, m, true);
 		apply_bytes_dec(m, send);
 		*copied -= send;
-		*sg_size -= send;
+		ctx->sg_plaintext_size -= send;
 		err = -EACCES;
 		break;
 	}
 
 	if (likely(!err)) {
-		m->eval =  __SK_NONE; //bpf_md_init
+		bpf_md_init(psock, m);
 		if (m &&
 		    m->sg_data[m->sg_start].page_link &&
 		    m->sg_data[m->sg_start].length)
@@ -551,6 +613,7 @@ more_data:
 	}
 
 out_err:
+	smap_release_sock(psock, sk);
 	return err;
 }
 
@@ -618,6 +681,8 @@ alloc_encrypted:
 		}
 
 		if (full_record || eor) {
+			int i, first = sgmsg->sg_end;
+
 			ret = zerocopy_from_iter(sk, &msg->msg_iter,
 				try_to_copy, &sgmsg->sg_end,
 				&ctx->sg_plaintext_size, sgmsg->sg_data,
@@ -627,13 +692,27 @@ alloc_encrypted:
 				goto fallback_to_reg_send;
 
 			copied += try_to_copy;
-			ret = tls_push_record(sk, msg->msg_flags, record_type);
+			/* Account for zerocopy if pull data is being used */
+			/* TBD: maybe we can be clever and avoid another list walk, but its only frags elems so... */
+			for (i = first; i < sgmsg->sg_end;) {
+				sgmsg->sg_copy[i] = true;
+				i++;
+				if (i == MAX_SKB_FRAGS)
+					i = 0;
+			}
+			ret = bpf_exec_tx_verdict(sgmsg, sk, &copied, msg->msg_flags, ctx->sg_plaintext_size);
 			if (!ret)
 				continue;
-			if (ret == -EAGAIN)
+			if (ret == -EAGAIN || ret ==  -EACCES)
 				goto send_end;
 
 			copied -= try_to_copy;
+			for (i = first; i < sgmsg->sg_end;) {
+				sgmsg->sg_copy[i] = false;
+				i++;
+				if (i == MAX_SKB_FRAGS)
+					i = 0;
+			}
 fallback_to_reg_send:
 			iov_iter_revert(&msg->msg_iter,
 					ctx->sg_plaintext_size - orig_size);
@@ -670,14 +749,12 @@ alloc_plaintext:
 			goto trim_sgl;
 
 		copied += try_to_copy;
-		ret = bpf_exec_tx_verdict(sgmsg, sk, &copied, msg->msg_flags, &ctx->sg_plaintext_size);
 		if (full_record || eor) {
 push_record:
-			ret = tls_push_record(sk, msg->msg_flags, record_type);
+			ret = bpf_exec_tx_verdict(sgmsg, sk, &copied, msg->msg_flags, ctx->sg_plaintext_size);
 			if (ret) {
 				if (ret == -ENOMEM)
 					goto wait_for_memory;
-
 				goto send_end;
 			}
 		}
@@ -1336,6 +1413,7 @@ int tls_set_sw_offload(struct sock *sk, struct tls_context *ctx, int tx)
 			rc = -ENOMEM;
 			goto free_iv;
 		}
+		sw_ctx_tx->sg_plaintext_msg->eval = __SK_NONE;
 		sg_init_table(sw_ctx_tx->sg_encrypted_data,
 			      ARRAY_SIZE(sw_ctx_tx->sg_encrypted_data));
 		sg_init_table(sw_ctx_tx->sg_plaintext_msg->sg_data,
