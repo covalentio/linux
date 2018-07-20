@@ -517,7 +517,7 @@ static int sendmsg_test(struct sockmap_options *opt)
 		rx_fd = p2;
 
 	if (ktls) {
-		err = sockmap_init_ktls(rx_fd);
+		err = 0;//sockmap_init_ktls(rx_fd);
 		if (err)
 			return err;
 		err = sockmap_init_ktls(c1);

@@ -444,7 +444,7 @@ retry:
 	return 0;
 }
 
-static void return_mem_sg(struct sock *sk, int bytes, struct sk_msg_buff *md)
+void return_mem_sg(struct sock *sk, int bytes, struct sk_msg_buff *md)
 {
 	struct scatterlist *sg = md->sg_data;
 	int i = md->sg_start;
@@ -639,9 +639,9 @@ static int bpf_tcp_ingress(struct sock *sk, int apply_bytes,
 	return err;
 }
 
-static int bpf_tcp_sendmsg_do_redirect(struct sock *sk, int send,
-				       struct sk_msg_buff *md,
-				       int flags)
+int bpf_tcp_sendmsg_do_redirect(struct sock *sk, int send,
+				struct sk_msg_buff *md,
+				int flags)
 {
 	bool ingress = !!(md->flags & BPF_F_INGRESS);
 	struct smap_psock *psock;

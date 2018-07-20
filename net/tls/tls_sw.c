@@ -626,10 +626,9 @@ more_data:
 		printk("%s: end: __sk_pass start %i end (%i)\n", __func__, m->sg_start, m->sg_end);
 		//apply_bytes_dec(m, send);
 		break;
-#if 0
 	case __SK_REDIRECT:
 		redir = psock->sk_redir;
-		apply_bytes_dec(psock, send);
+		//apply_bytes_dec(psock, send);
 
 		if (psock->cork) {
 			cork = true;
@@ -644,6 +643,7 @@ more_data:
 
 		if (unlikely(err < 0)) {
 			free_start_sg(sk, m);
+#if 0
 			*sg_size = 0;
 			if (!cork)
 				*copied -= send;
@@ -657,9 +657,9 @@ more_data:
 			kfree(m);
 			m = NULL;
 			err = 0;
+#endif
 		}
 		break;
-#endif
 	case __SK_DROP:
 	default:
 		free_bytes_sg(sk, send, m, true);

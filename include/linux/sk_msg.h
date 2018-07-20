@@ -127,4 +127,8 @@ static inline struct smap_psock *smap_psock_sk(const struct sock *sk)
 
 struct sock *do_msg_redirect_map(struct sk_msg_buff *md);
 void smap_release_sock(struct smap_psock *psock, struct sock *sock);
+int bpf_tcp_sendmsg_do_redirect(struct sock *sk, int send,
+				struct sk_msg_buff *md,
+				int flags);
+void return_mem_sg(struct sock *sk, int bytes, struct sk_msg_buff *md);
 #endif
