@@ -123,6 +123,7 @@ int tls_push_sg(struct sock *sk,
 		tcp_rate_check_app_limited(sk);
 		p = sg_page(sg);
 retry:
+		printk("%s: size %zu offset %i\n", __func__, size, offset);
 		ret = do_tcp_sendpages(sk, p, offset, size, sendpage_flags);
 
 		if (ret != size) {
@@ -136,6 +137,7 @@ retry:
 			ctx->partially_sent_offset = offset;
 			ctx->partially_sent_record = (void *)sg;
 			ctx->in_tcp_sendpages = false;
+			printk("%s: send_failed %i\n", __func__, ret);
 			return ret;
 		}
 
@@ -613,13 +615,15 @@ static void build_protos(struct proto prot[TLS_NUM_CONFIG][TLS_NUM_CONFIG],
 	prot[TLS_SW][TLS_BASE].sendmsg		= tls_sw_sendmsg;
 	prot[TLS_SW][TLS_BASE].sendpage		= tls_sw_sendpage;
 
-	prot[TLS_BASE][TLS_SW] = prot[TLS_BASE][TLS_BASE];
-	prot[TLS_BASE][TLS_SW].recvmsg		= tls_sw_recvmsg;
-	prot[TLS_BASE][TLS_SW].close		= tls_sk_proto_close;
+	prot[TLS_BASE][TLS_SW]			  = prot[TLS_BASE][TLS_BASE];
+	prot[TLS_BASE][TLS_SW].recvmsg		  = tls_sw_recvmsg;
+	prot[TLS_BASE][TLS_SW].stream_memory_read = tls_sw_stream_read;
+	prot[TLS_BASE][TLS_SW].close		  = tls_sk_proto_close;
 
-	prot[TLS_SW][TLS_SW] = prot[TLS_SW][TLS_BASE];
-	prot[TLS_SW][TLS_SW].recvmsg	= tls_sw_recvmsg;
-	prot[TLS_SW][TLS_SW].close	= tls_sk_proto_close;
+	prot[TLS_SW][TLS_SW]			  = prot[TLS_SW][TLS_BASE];
+	prot[TLS_SW][TLS_SW].recvmsg		  = tls_sw_recvmsg;
+	prot[TLS_SW][TLS_SW].stream_memory_read = tls_sw_stream_read;
+	prot[TLS_SW][TLS_SW].close		  = tls_sk_proto_close;
 
 #ifdef CONFIG_TLS_DEVICE
 	prot[TLS_HW][TLS_BASE] = prot[TLS_BASE][TLS_BASE];
@@ -712,7 +716,7 @@ static int __init tls_register(void)
 	build_protos(tls_prots[TLSV4], &tcp_prot);
 
 	tls_sw_proto_ops = inet_stream_ops;
-	tls_sw_proto_ops.poll = tls_sw_poll;
+	//tls_sw_proto_ops.poll = tls_sw_poll;
 	tls_sw_proto_ops.splice_read = tls_sw_splice_read;
 
 #ifdef CONFIG_TLS_DEVICE

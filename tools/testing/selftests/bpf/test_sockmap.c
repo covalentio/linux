@@ -365,8 +365,12 @@ static int msg_loop(int fd, int iov_count, int iov_length, int cnt,
 		if (data_test && tx) {
 			int j;
 
-			for (j = 0; j < iov_length; j++)
+			printf("send: ");
+			for (j = 0; j < iov_length; j++) {
 				d[j] = k++;
+				printf("%04X.", d[j]);
+			}	
+			printf("\n");
 		}
 	}
 
@@ -423,6 +427,7 @@ static int msg_loop(int fd, int iov_count, int iov_length, int cnt,
 			FD_ZERO(&w);
 			FD_SET(fd, &w);
 
+#if 1
 			slct = select(max_fd + 1, &w, NULL, NULL, &timeout);
 			if (slct == -1) {
 				perror("select()");
@@ -435,6 +440,7 @@ static int msg_loop(int fd, int iov_count, int iov_length, int cnt,
 				clock_gettime(CLOCK_MONOTONIC, &s->end);
 				goto out_errno;
 			}
+#endif
 
 			recv = recvmsg(fd, &msg, flags);
 			if (recv < 0) {
@@ -454,8 +460,10 @@ static int msg_loop(int fd, int iov_count, int iov_length, int cnt,
 				for (i = 0; i < msg.msg_iovlen; i++) {
 					unsigned char *d = iov[i].iov_base;
 
+					printf("recv: ");
 					for (j = 0;
 					     j < iov[i].iov_len && recv; j++) {
+#if 0
 						if (d[j] != k++) {
 							errno = -EIO;
 							fprintf(stderr,
@@ -463,6 +471,8 @@ static int msg_loop(int fd, int iov_count, int iov_length, int cnt,
 								i, j, d[j], k - 1, d[j+1], k);
 							goto out_errno;
 						}
+#endif
+						printf("%04X.", d[j]);
 						bytes_cnt++;
 						if (bytes_cnt == chunk_sz) {
 							k = 0;
@@ -470,6 +480,7 @@ static int msg_loop(int fd, int iov_count, int iov_length, int cnt,
 						}
 						recv--;
 					}
+					printf("\n");
 				}
 			}
 		}
@@ -517,9 +528,11 @@ static int sendmsg_test(struct sockmap_options *opt)
 		rx_fd = p2;
 
 	if (ktls) {
-		err = sockmap_init_ktls(rx_fd);
-		if (err)
-			return err;
+		if (!txmsg_redir || (txmsg_redir && txmsg_ingress)) {
+			err = sockmap_init_ktls(rx_fd);
+			if (err)
+				return err;
+		}
 		err = sockmap_init_ktls(c1);
 		if (err)
 			return err;
@@ -569,7 +582,6 @@ static int sendmsg_test(struct sockmap_options *opt)
 			fprintf(stderr,
 				"msg_loop_tx: iov_count %i iov_buf %i cnt %i err %i\n",
 				iov_count, iov_buf, cnt, err);
-		sleep(2);
 		shutdown(c1, SHUT_RDWR);
 		if (s.end.tv_sec - s.start.tv_sec) {
 			sent_Bps = sentBps(s);

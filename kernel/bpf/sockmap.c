@@ -444,7 +444,7 @@ retry:
 	return 0;
 }
 
-static void return_mem_sg(struct sock *sk, int bytes, struct sk_msg_buff *md)
+void return_mem_sg(struct sock *sk, int bytes, struct sk_msg_buff *md)
 {
 	struct scatterlist *sg = md->sg_data;
 	int i = md->sg_start;
@@ -639,9 +639,9 @@ static int bpf_tcp_ingress(struct sock *sk, int apply_bytes,
 	return err;
 }
 
-static int bpf_tcp_sendmsg_do_redirect(struct sock *sk, int send,
-				       struct sk_msg_buff *md,
-				       int flags)
+int bpf_tcp_sendmsg_do_redirect(struct sock *sk, int send,
+				struct sk_msg_buff *md,
+				int flags)
 {
 	bool ingress = !!(md->flags & BPF_F_INGRESS);
 	struct smap_psock *psock;
@@ -661,10 +661,14 @@ static int bpf_tcp_sendmsg_do_redirect(struct sock *sk, int send,
 	rcu_read_unlock();
 
 	if (ingress) {
+		printk("%s: ingress %i -- %p\n", __func__, send, sk);
 		err = bpf_tcp_ingress(sk, send, psock, md, flags);
+		printk("%s: err %i ingress %i -- %p\n", __func__, err, send, sk);
 	} else {
 		lock_sock(sk);
+		printk("%s: tcp_push %i -- %p\n", __func__, send, sk);
 		err = bpf_tcp_push(sk, send, md, flags, false);
+		printk("%s: err %i tcp_push %i -- %p\n", __func__, err, send, sk);
 		release_sock(sk);
 	}
 	smap_release_sock(psock, sk);
@@ -819,30 +823,13 @@ static int bpf_wait_data(struct sock *sk,
 	return rc;
 }
 
-static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
-			   int nonblock, int flags, int *addr_len)
+int __bpf_tcp_recvmsg(struct sock *sk, struct smap_psock *psock, struct msghdr *msg, int len)
 {
 	struct iov_iter *iter = &msg->msg_iter;
-	struct smap_psock *psock;
 	int copied = 0;
 
-	if (unlikely(flags & MSG_ERRQUEUE))
-		return inet_recv_error(sk, msg, len, addr_len);
+	printk("%s: psock %p len %i\n", __func__, psock, len);
 
-	rcu_read_lock();
-	psock = smap_psock_sk(sk);
-	if (unlikely(!psock))
-		goto out;
-
-	if (unlikely(!refcount_inc_not_zero(&psock->refcnt)))
-		goto out;
-	rcu_read_unlock();
-
-	if (!skb_queue_empty(&sk->sk_receive_queue))
-		return tcp_recvmsg(sk, msg, len, nonblock, flags, addr_len);
-
-	lock_sock(sk);
-bytes_ready:
 	while (copied != len) {
 		struct scatterlist *sg;
 		struct sk_msg_buff *md;
@@ -896,6 +883,33 @@ bytes_ready:
 			kfree(md);
 		}
 	}
+	return copied;
+}
+
+static int bpf_tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
+			   int nonblock, int flags, int *addr_len)
+{
+	struct smap_psock *psock;
+	int copied = 0;
+
+	if (unlikely(flags & MSG_ERRQUEUE))
+		return inet_recv_error(sk, msg, len, addr_len);
+
+	rcu_read_lock();
+	psock = smap_psock_sk(sk);
+	if (unlikely(!psock))
+		goto out;
+
+	if (unlikely(!refcount_inc_not_zero(&psock->refcnt)))
+		goto out;
+	rcu_read_unlock();
+
+	if (!skb_queue_empty(&sk->sk_receive_queue))
+		return tcp_recvmsg(sk, msg, len, nonblock, flags, addr_len);
+
+	lock_sock(sk);
+bytes_ready:
+	copied = __bpf_tcp_recvmsg(sk, psock, msg, len);
 
 	if (!copied) {
 		long timeo;

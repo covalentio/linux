@@ -224,6 +224,7 @@ void tls_sw_free_resources_tx(struct sock *sk);
 void tls_sw_free_resources_rx(struct sock *sk);
 int tls_sw_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 		   int nonblock, int flags, int *addr_len);
+bool tls_sw_stream_read(const struct sock *sk);
 unsigned int tls_sw_poll(struct file *file, struct socket *sock,
 			 struct poll_table_struct *wait);
 ssize_t tls_sw_splice_read(struct socket *sock, loff_t *ppos,
@@ -343,6 +344,8 @@ static inline void tls_fill_prepend(struct tls_context *ctx,
 	buf[4] = pkt_len & 0xFF;
 	memcpy(buf + TLS_NONCE_OFFSET,
 	       ctx->tx.iv + TLS_CIPHER_AES_GCM_128_SALT_SIZE, iv_size);
+
+	printk("%s: iv_size %zu\n", __func__, iv_size);
 }
 
 static inline void tls_make_aad(char *buf,
