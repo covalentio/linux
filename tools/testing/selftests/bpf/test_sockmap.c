@@ -506,8 +506,8 @@ unwind_iov:
 
 static int msg_verify_data(struct msghdr *msg, int size, int chunk_sz)
 {
-	int i, j = 0, bytes_cnt = 0;
-	unsigned char k = 0;
+	int i, j = 4, bytes_cnt = 0;
+	unsigned char k = 4;
 
 	for (i = 0; i < msg->msg_iovlen; i++) {
 		unsigned char *d = msg->msg_iov[i].iov_base;
@@ -517,26 +517,17 @@ static int msg_verify_data(struct msghdr *msg, int size, int chunk_sz)
 			if (msg->msg_iov[i].iov_len < 4)
 				return -EIO;
 			if (txmsg_ktls_skb_redir) {
-				if (memcmp(&d[13], "PASS", 4) != 0) {
+				if (memcmp(&d[0], "PASS", 4) != 0) {
 					fprintf(stderr,
-						"detected redirect ktls_skb data error with skb ingress update @iov[%i]:%i \"%02x %02x %02x %02x\" != \"PASS\"\n", i, 0, d[13], d[14], d[15], d[16]);
+						"detected redirect ktls_skb data error with skb ingress update @iov[%i]:%i \"%02x %02x %02x %02x\" != \"PASS\"\n", i, 0, d[0], d[1], d[2], d[3]);
 					return -EIO;
 				}
-				d[13] = 0;
-				d[14] = 1;
-				d[15] = 2;
-				d[16] = 3;
-				j = 13;
 			} else if (txmsg_ktls_skb) {
 				if (memcmp(d, "PASS", 4) != 0) {
 					fprintf(stderr,
 						"detected ktls_skb data error with skb ingress update @iov[%i]:%i \"%02x %02x %02x %02x\" != \"PASS\"\n", i, 0, d[0], d[1], d[2], d[3]);
 					return -EIO;
 				}
-				d[0] = 0;
-				d[1] = 1;
-				d[2] = 2;
-				d[3] = 3;
 			}
 		}
 
