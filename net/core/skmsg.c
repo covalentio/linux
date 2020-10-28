@@ -404,11 +404,13 @@ static struct sk_msg *sk_psock_create_ingress_msg(struct sock *sk,
 {
 	struct sk_msg *msg;
 
-	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf)
-		return 0;
+	if (likely(skb->sk != sk)) {
+		if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf)
+			return 0;
 
-	if (!sk_rmem_schedule(sk, skb, skb->len))
-		return 0;
+		if (!sk_rmem_schedule(sk, skb, skb->len))
+			return 0;
+	}
 
 	msg = kzalloc(sizeof(*msg), __GFP_NOWARN | GFP_ATOMIC);
 	if (unlikely(!msg))
@@ -455,9 +457,12 @@ static int sk_psock_skb_ingress(struct sk_psock *psock, struct sk_buff *skb)
 	 * the BPF program was run initiating the redirect to the socket
 	 * we will eventually receive this data on. The data will be released
 	 * from skb_consume found in __tcp_bpf_recvmsg() after its been copied
-	 * into user buffers.
+	 * into user buffers. If we are receiving on the same sock skb->sk is
+	 * already assigned, skip memory accounting and owner transition seeing
+	 * it already set correctly.
 	 */
-	skb_set_owner_r(skb, sk);
+	if (likely(skb->sk != sk))
+		skb_set_owner_r(skb, sk);
 	return sk_psock_skb_ingress_enqueue(skb, psock, sk, msg);
 }
 
